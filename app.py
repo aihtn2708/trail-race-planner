@@ -9,6 +9,7 @@ import smtplib
 from email.message import EmailMessage
 import random
 import string
+import io  # <-- NEW IMPORT ADDED HERE
 
 st.set_page_config(page_title="Trail Race Planner", layout="wide")
 
@@ -17,9 +18,22 @@ try:
     SENDER_EMAIL = st.secrets["SENDER_EMAIL"]
     SENDER_APP_PASSWORD = st.secrets["SENDER_APP_PASSWORD"]
 except (FileNotFoundError, KeyError):
-    # Fallback if secrets.toml is not set up yet
     SENDER_EMAIL = ""
     SENDER_APP_PASSWORD = ""
+
+# --- Time Math Helpers ---
+def pace_to_seconds(pace_str):
+    try:
+        parts = str(pace_str).split(':')
+        return int(parts[0]) * 60 + int(parts[1])
+    except:
+        return 360
+
+def seconds_to_eta(total_seconds):
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 # --- 1. Database & Security Functions ---
 def init_db():
@@ -72,23 +86,6 @@ def update_user_password(email, new_password):
     conn.commit()
     conn.close()
 
-# --- Time Math Helpers ---
-def pace_to_seconds(pace_str):
-    """Converts a string like '06:30' to 390 seconds."""
-    try:
-        parts = str(pace_str).split(':')
-        return int(parts[0]) * 60 + int(parts[1])
-    except:
-        return 360 # Default to 6:00 if formatted incorrectly
-
-def seconds_to_eta(total_seconds):
-    """Converts 390 seconds to '00:06:30' ETA format."""
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-
 # --- 2. State Initialization ---
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
@@ -102,11 +99,13 @@ st.sidebar.title("Account Access")
 if not st.session_state.logged_in:
     col1, col2 = st.sidebar.columns(2)
     with col1:
-        if st.button("👤 Guest", use_container_width=True):
+        # FIXED: width="stretch"
+        if st.button("👤 Guest", width="stretch"):
             st.session_state.guest_mode = True
             
     with col2:
-        if st.button("🔒 Log In", use_container_width=True):
+        # FIXED: width="stretch"
+        if st.button("🔒 Log In", width="stretch"):
             st.session_state.guest_mode = False
 
     if st.session_state.guest_mode:
@@ -114,7 +113,6 @@ if not st.session_state.logged_in:
     else:
         auth_tabs = st.sidebar.tabs(["Log In", "Sign Up"])
         
-        # --- LOG IN TAB ---
         with auth_tabs[0]:
             login_email = st.text_input("Email", key="log_email")
             login_pwd = st.text_input("Password", type="password", key="log_pwd")
@@ -133,7 +131,6 @@ if not st.session_state.logged_in:
                 else:
                     st.error("Invalid email or password.")
             
-            # --- FORGOT PASSWORD EXPANDER ---
             with st.expander("Forgot Password?"):
                 reset_email = st.text_input("Enter your account email")
                 if st.button("Reset Password"):
@@ -156,7 +153,6 @@ if not st.session_state.logged_in:
                         st.error("Email not found in database.")
                     conn.close()
 
-        # --- SIGN UP TAB ---
         with auth_tabs[1]:
             reg_email = st.text_input("Email", key="reg_email")
             reg_pwd = st.text_input("Password", type="password", key="reg_pwd")
@@ -180,9 +176,9 @@ if not st.session_state.logged_in:
                         conn.close()
 
 else:
-    # Logged In View
     st.sidebar.success(f"Logged in as:\n**{st.session_state.email}**")
-    if st.sidebar.button("Log Out", use_container_width=True):
+    # FIXED: width="stretch"
+    if st.sidebar.button("Log Out", width="stretch"):
         st.session_state.logged_in = False
         st.session_state.email = ""
         st.session_state.guest_mode = False
@@ -232,31 +228,25 @@ with active_tab:
     if uploaded_file is not None:
         plan_df, raw_df = process_gpx(uploaded_file.getvalue())
         
-        # --- Top Level Race Summary Metrics ---
         st.subheader("Race Summary")
         total_dist = raw_df['distance_m'].max() / 1000
         total_gain = plan_df['Gain_m'].sum()
         
-        # We create placeholders for the metrics so we can update the ETA *after* table edits
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Distance", f"{total_dist:.2f} km")
         col2.metric("Total Elevation Gain", f"{total_gain} m")
-        eta_metric = col3.empty() # Placeholder for the final calculated time
+        eta_metric = col3.empty()
         
-        # --- Course Profile ---
         st.subheader("Course Profile")
         fig = px.area(raw_df, x='distance_m', y='elevation', labels={'distance_m': 'Distance (m)', 'elevation': 'Elevation (m)'})
         fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=250)
-        st.plotly_chart(fig, use_container_width=True)
+        # FIXED: width="stretch"
+        st.plotly_chart(fig, width="stretch")
         
-        # --- Race Strategy Table Setup ---
         st.subheader("Race Strategy")
         
-        # Prepare the base table
         plan_df.insert(0, 'KM', plan_df['km_segment'])
         plan_df = plan_df.drop('km_segment', axis=1)
-        
-        # Set default values
         plan_df['Pace (mm:ss)'] = "06:00" 
         plan_df['💧 Water'] = False
         plan_df['🍯 Gel'] = False
@@ -266,7 +256,7 @@ with active_tab:
         
         st.markdown("**Edit your pace and check off your nutrition plan. The ETA will update automatically.**")
         
-        # The interactive data editor
+        # FIXED: width="stretch"
         edited_df = st.data_editor(
             plan_df, 
             column_config={
@@ -276,28 +266,19 @@ with active_tab:
                 "Pace (mm:ss)": st.column_config.TextColumn("Pace (mm:ss)"),
             },
             hide_index=True, 
-            use_container_width=True
+            width="stretch"
         )
         
-        # --- Reactive ETA Calculations ---
-        # 1. Convert user paces to seconds
         edited_df['pace_sec'] = edited_df['Pace (mm:ss)'].apply(pace_to_seconds)
-        
-        # 2. Calculate cumulative sum of seconds
         edited_df['cum_sec'] = edited_df['pace_sec'].cumsum()
-        
-        # 3. Format back to ETA string
         edited_df['ETA'] = edited_df['cum_sec'].apply(seconds_to_eta)
         
-        # 4. Extract total finish time to update the top metric card
         total_finish_time = edited_df['ETA'].iloc[-1] if not edited_df.empty else "00:00:00"
         eta_metric.metric("Estimated Finish Time", total_finish_time)
         
-        # Reorder columns to show ETA right after Pace
         cols = ['KM', 'Gain_m', 'Loss_m', 'Pace (mm:ss)', 'ETA', '💧 Water', '🍯 Gel', '🍌 Food', '🧂 Salt', 'Notes']
         final_display_df = edited_df[cols]
         
-        # --- Save Feature ---
         if st.session_state.logged_in:
             st.divider()
             st.subheader("💾 Save to Profile")
@@ -324,13 +305,14 @@ if st.session_state.logged_in:
         if not saved_data.empty:
             for index, row in saved_data.iterrows():
                 with st.expander(f"🏁 {row['race_name']}"):
-                    reconstructed_df = pd.read_json(row['plan_json'], orient='records')
-                    st.dataframe(reconstructed_df, hide_index=True, use_container_width=True)
+                    # FIXED: Wrapped the JSON string in io.StringIO() to prevent FutureWarnings
+                    reconstructed_df = pd.read_json(io.StringIO(row['plan_json']), orient='records')
+                    # FIXED: width="stretch"
+                    st.dataframe(reconstructed_df, hide_index=True, width="stretch")
         else:
             st.info("You haven't saved any races yet.")
             
     with settings_tab:
-        
         st.subheader("🔐 Change Your Password")
         st.info("If you logged in with a temporary password, please update it below.")
         
