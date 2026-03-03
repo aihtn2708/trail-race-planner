@@ -9,7 +9,7 @@ import smtplib
 from email.message import EmailMessage
 import random
 import string
-import io  # <-- NEW IMPORT ADDED HERE
+import io  
 
 st.set_page_config(page_title="Trail Race Planner", layout="wide")
 
