@@ -12,11 +12,14 @@ import string
 
 st.set_page_config(page_title="Trail Race Planner", layout="wide")
 
-# --- Configuration for Email Sending ---
-# To send real emails, put your Gmail address and a 16-character "App Password" here.
-# (You generate App Passwords in your Google Account Security settings).
-SENDER_EMAIL = "aihtn2708@gmail.com" 
-SENDER_APP_PASSWORD = "hrph tlsh ysxg leti" 
+# --- Configuration for Email Sending (Using Streamlit Secrets) ---
+try:
+    SENDER_EMAIL = st.secrets["SENDER_EMAIL"]
+    SENDER_APP_PASSWORD = st.secrets["SENDER_APP_PASSWORD"]
+except (FileNotFoundError, KeyError):
+    # Fallback if secrets.toml is not set up yet
+    SENDER_EMAIL = ""
+    SENDER_APP_PASSWORD = ""
 
 # --- 1. Database & Security Functions ---
 def init_db():
@@ -44,18 +47,10 @@ def generate_temp_password():
 
 def send_reset_email(to_email, temp_password):
     if not SENDER_EMAIL or not SENDER_APP_PASSWORD:
-        # Fallback for testing if email is not configured yet
         return "SIMULATED"
-def update_user_password(email, new_password):
-    conn = sqlite3.connect('races.db')
-    c = conn.cursor()
-    new_hash = hash_password(new_password)
-    c.execute("UPDATE users SET password_hash=? WHERE email=?", (new_hash, email))
-    conn.commit()
-    conn.close()
-    
+        
     msg = EmailMessage()
-    msg.set_content(f"Your temporary password is: {temp_password}\n\nPlease log in and update your password.")
+    msg.set_content(f"Your temporary password is: {temp_password}\n\nPlease log in and update your password immediately.")
     msg['Subject'] = 'Password Reset - Trail Race Planner'
     msg['From'] = SENDER_EMAIL
     msg['To'] = to_email
@@ -69,6 +64,14 @@ def update_user_password(email, new_password):
     except Exception as e:
         return f"ERROR: {e}"
 
+def update_user_password(email, new_password):
+    conn = sqlite3.connect('races.db')
+    c = conn.cursor()
+    new_hash = hash_password(new_password)
+    c.execute("UPDATE users SET password_hash=? WHERE email=?", (new_hash, email))
+    conn.commit()
+    conn.close()
+
 # --- 2. State Initialization ---
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
@@ -80,7 +83,6 @@ if 'guest_mode' not in st.session_state:
 st.sidebar.title("Account Access")
 
 if not st.session_state.logged_in:
-    # Side-by-side Guest / Login layout
     col1, col2 = st.sidebar.columns(2)
     with col1:
         if st.button("👤 Guest", use_container_width=True):
@@ -132,7 +134,7 @@ if not st.session_state.logged_in:
                         elif email_status == "SIMULATED":
                             st.warning(f"Email config missing. Your temp password is: **{temp_pwd}**")
                         else:
-                            st.error("Failed to send email. Check logs.")
+                            st.error(f"Failed to send email: {email_status}")
                     else:
                         st.error("Email not found in database.")
                     conn.close()
@@ -258,30 +260,30 @@ if st.session_state.logged_in:
             st.info("You haven't saved any races yet.")
             
     with settings_tab:
-            st.subheader("🔐 Change Your Password")
-            st.info("Since you logged in with a temporary password, it is highly recommended to change it now.")
+        
+        st.subheader("🔐 Change Your Password")
+        st.info("If you logged in with a temporary password, please update it below.")
+        
+        with st.form("change_password_form"):
+            current_pwd = st.text_input("Current Password", type="password")
+            new_pwd = st.text_input("New Password", type="password")
+            confirm_pwd = st.text_input("Confirm New Password", type="password")
             
-            with st.form("change_password_form"):
-                current_pwd = st.text_input("Current Password", type="password")
-                new_pwd = st.text_input("New Password", type="password")
-                confirm_pwd = st.text_input("Confirm New Password", type="password")
+            submit_change = st.form_submit_button("Update Password")
+            
+            if submit_change:
+                conn = sqlite3.connect('races.db')
+                c = conn.cursor()
+                c.execute("SELECT password_hash FROM users WHERE email=?", (st.session_state.email,))
+                stored_hash = c.fetchone()[0]
+                conn.close()
                 
-                submit_change = st.form_submit_button("Update Password")
-                
-                if submit_change:
-                    # 1. Verify Current Password
-                    conn = sqlite3.connect('races.db')
-                    c = conn.cursor()
-                    c.execute("SELECT password_hash FROM users WHERE email=?", (st.session_state.email,))
-                    stored_hash = c.fetchone()[0]
-                    conn.close()
-                    
-                    if not verify_password(current_pwd, stored_hash):
-                        st.error("The current password you entered is incorrect.")
-                    elif new_pwd != confirm_pwd:
-                        st.error("New passwords do not match.")
-                    elif len(new_pwd) < 8:
-                        st.error("New password must be at least 8 characters long.")
-                    else:
-                        update_user_password(st.session_state.email, new_pwd)
-                        st.success("Password updated successfully! Next time you log in, use your new password.")
+                if not verify_password(current_pwd, stored_hash):
+                    st.error("The current password you entered is incorrect.")
+                elif new_pwd != confirm_pwd:
+                    st.error("New passwords do not match.")
+                elif len(new_pwd) < 6:
+                    st.error("New password must be at least 6 characters long.")
+                else:
+                    update_user_password(st.session_state.email, new_pwd)
+                    st.success("Password updated successfully! Use your new password next time you log in.")
