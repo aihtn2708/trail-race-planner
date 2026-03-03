@@ -72,6 +72,23 @@ def update_user_password(email, new_password):
     conn.commit()
     conn.close()
 
+# --- Time Math Helpers ---
+def pace_to_seconds(pace_str):
+    """Converts a string like '06:30' to 390 seconds."""
+    try:
+        parts = str(pace_str).split(':')
+        return int(parts[0]) * 60 + int(parts[1])
+    except:
+        return 360 # Default to 6:00 if formatted incorrectly
+
+def seconds_to_eta(total_seconds):
+    """Converts 390 seconds to '00:06:30' ETA format."""
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 # --- 2. State Initialization ---
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
@@ -215,19 +232,72 @@ with active_tab:
     if uploaded_file is not None:
         plan_df, raw_df = process_gpx(uploaded_file.getvalue())
         
+        # --- Top Level Race Summary Metrics ---
+        st.subheader("Race Summary")
+        total_dist = raw_df['distance_m'].max() / 1000
+        total_gain = plan_df['Gain_m'].sum()
+        
+        # We create placeholders for the metrics so we can update the ETA *after* table edits
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Distance", f"{total_dist:.2f} km")
+        col2.metric("Total Elevation Gain", f"{total_gain} m")
+        eta_metric = col3.empty() # Placeholder for the final calculated time
+        
+        # --- Course Profile ---
         st.subheader("Course Profile")
         fig = px.area(raw_df, x='distance_m', y='elevation', labels={'distance_m': 'Distance (m)', 'elevation': 'Elevation (m)'})
+        fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=250)
         st.plotly_chart(fig, use_container_width=True)
         
+        # --- Race Strategy Table Setup ---
         st.subheader("Race Strategy")
+        
+        # Prepare the base table
         plan_df.insert(0, 'KM', plan_df['km_segment'])
         plan_df = plan_df.drop('km_segment', axis=1)
-        plan_df['Pace (min/km)'] = "06:00" 
-        plan_df['Nutrition'] = "Water"
+        
+        # Set default values
+        plan_df['Pace (mm:ss)'] = "06:00" 
+        plan_df['💧 Water'] = False
+        plan_df['🍯 Gel'] = False
+        plan_df['🍌 Food'] = False
+        plan_df['🧂 Salt'] = False
         plan_df['Notes'] = ""
         
-        edited_df = st.data_editor(plan_df, hide_index=True, use_container_width=True)
+        st.markdown("**Edit your pace and check off your nutrition plan. The ETA will update automatically.**")
         
+        # The interactive data editor
+        edited_df = st.data_editor(
+            plan_df, 
+            column_config={
+                "KM": st.column_config.NumberColumn(disabled=True),
+                "Gain_m": st.column_config.NumberColumn("Gain (m)", disabled=True),
+                "Loss_m": st.column_config.NumberColumn("Loss (m)", disabled=True),
+                "Pace (mm:ss)": st.column_config.TextColumn("Pace (mm:ss)"),
+            },
+            hide_index=True, 
+            use_container_width=True
+        )
+        
+        # --- Reactive ETA Calculations ---
+        # 1. Convert user paces to seconds
+        edited_df['pace_sec'] = edited_df['Pace (mm:ss)'].apply(pace_to_seconds)
+        
+        # 2. Calculate cumulative sum of seconds
+        edited_df['cum_sec'] = edited_df['pace_sec'].cumsum()
+        
+        # 3. Format back to ETA string
+        edited_df['ETA'] = edited_df['cum_sec'].apply(seconds_to_eta)
+        
+        # 4. Extract total finish time to update the top metric card
+        total_finish_time = edited_df['ETA'].iloc[-1] if not edited_df.empty else "00:00:00"
+        eta_metric.metric("Estimated Finish Time", total_finish_time)
+        
+        # Reorder columns to show ETA right after Pace
+        cols = ['KM', 'Gain_m', 'Loss_m', 'Pace (mm:ss)', 'ETA', '💧 Water', '🍯 Gel', '🍌 Food', '🧂 Salt', 'Notes']
+        final_display_df = edited_df[cols]
+        
+        # --- Save Feature ---
         if st.session_state.logged_in:
             st.divider()
             st.subheader("💾 Save to Profile")
@@ -237,10 +307,10 @@ with active_tab:
                     conn = sqlite3.connect('races.db')
                     c = conn.cursor()
                     c.execute("INSERT INTO saved_races (email, race_name, plan_json) VALUES (?, ?, ?)", 
-                              (st.session_state.email, race_name, edited_df.to_json(orient='records')))
+                              (st.session_state.email, race_name, final_display_df.to_json(orient='records')))
                     conn.commit()
                     conn.close()
-                    st.success(f"'{race_name}' saved successfully!")
+                    st.success(f"'{race_name}' saved successfully with a finish time of {total_finish_time}!")
                 else:
                     st.warning("Please enter a race name.")
 
