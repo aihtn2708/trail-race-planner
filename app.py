@@ -35,24 +35,43 @@ if 'authenticator' not in st.session_state:
 st.session_state.authenticator.check_authentification()
 
 # --- 3. Sidebar: Google Login Flow ---
-st.sidebar.title("Account")
+st.sidebar.title("Account Access")
 
 if not st.session_state.get('connected', False):
-    st.sidebar.write("Guest mode active. You can upload and export CSVs, but plans won't be saved.")
-    st.sidebar.divider()
-    st.sidebar.write("Log in to save your race plans.")
+    st.sidebar.markdown("Choose how you want to continue:")
     
-    # Renders the Google Login Button
-    st.session_state.authenticator.login()
+    # Create two columns in the sidebar to put the options side-by-side
+    col1, col2 = st.sidebar.columns(2)
+    
+    with col1:
+        # A button to explicitly acknowledge anonymous mode
+        if st.button("👤 Guest Mode", use_container_width=True):
+            st.session_state['guest_acknowledged'] = True
+            st.rerun()
+            
+    with col2:
+        # The Google Login button placed neatly beside it
+        st.session_state.authenticator.login()
+        
+    st.sidebar.divider()
+    
+    # Show this message if they are browsing anonymously
+    if st.session_state.get('guest_acknowledged', False):
+         st.sidebar.info("You are using Anonymous Mode. You can upload GPX files and export CSVs, but your race plans will not be saved.")
+
 else:
     # User is logged in via Google! Extract their info.
     user_info = st.session_state['user_info']
     google_email = user_info.get('email')
     
-    st.sidebar.image(user_info.get('picture'), width=50)
-    st.sidebar.success(f"Welcome, {user_info.get('name')}!")
-    
-    if st.sidebar.button("Log Out"):
+    # Display their profile picture and a clean logout button
+    col1, col2 = st.sidebar.columns([1, 3])
+    with col1:
+        st.image(user_info.get('picture'), width=40)
+    with col2:
+        st.write(f"**{user_info.get('name')}**")
+        
+    if st.sidebar.button("Log Out", use_container_width=True):
         st.session_state.authenticator.logout()
         st.rerun()
 
