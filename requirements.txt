@@ -3,3 +3,4 @@ gpxpy
 pandas
 plotly
 streamlit-google-auth
+bcrypt
