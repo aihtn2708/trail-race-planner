@@ -27,52 +27,53 @@ if 'authenticator' not in st.session_state:
     st.session_state.authenticator = Authenticate(
         secret_credentials_path='google_credentials.json',
         cookie_name='trail_planner_auth',
-        cookie_key='super_secret_key_change_me', # Change this to a random string!
+        cookie_key='super_secret_key_change', # Change this to a random string!
         redirect_uri='https://trail-race-planner.streamlit.app'      # Update url of streamlit
     )
 
 # Catch the login event when Google redirects back to the app
 st.session_state.authenticator.check_authentification()
 
-# --- 3. Sidebar: Google Login Flow ---
+# --- 3. Sidebar: Google Login & Guest Mode ---
 st.sidebar.title("Account Access")
 
 if not st.session_state.get('connected', False):
     st.sidebar.markdown("Choose how you want to continue:")
     
-    # Create two columns in the sidebar to put the options side-by-side
+    # Create two equal-width columns in the sidebar
     col1, col2 = st.sidebar.columns(2)
     
     with col1:
-        # A button to explicitly acknowledge anonymous mode
-        if st.button("👤 Guest Mode", use_container_width=True):
-            st.session_state['guest_acknowledged'] = True
+        # Custom button for Guest Mode
+        if st.button("👤 Guest", use_container_width=True):
+            st.session_state['guest_mode'] = True
             st.rerun()
             
     with col2:
-        # The Google Login button placed neatly beside it
+        # The Google Login button (automatically handles its own styling)
         st.session_state.authenticator.login()
         
     st.sidebar.divider()
     
-    # Show this message if they are browsing anonymously
-    if st.session_state.get('guest_acknowledged', False):
-         st.sidebar.info("You are using Anonymous Mode. You can upload GPX files and export CSVs, but your race plans will not be saved.")
+    # Contextual message for Guests
+    if st.session_state.get('guest_mode', False):
+         st.sidebar.info("✨ **Guest Mode Active**\nYou can plan races and export CSVs, but saving to a profile requires a Google login.")
 
 else:
-    # User is logged in via Google! Extract their info.
+    # User is logged in!
     user_info = st.session_state['user_info']
-    google_email = user_info.get('email')
     
-    # Display their profile picture and a clean logout button
-    col1, col2 = st.sidebar.columns([1, 3])
-    with col1:
-        st.image(user_info.get('picture'), width=40)
-    with col2:
+    # Profile Header
+    col_img, col_txt = st.sidebar.columns([1, 3])
+    with col_img:
+        st.image(user_info.get('picture'), width=45)
+    with col_txt:
         st.write(f"**{user_info.get('name')}**")
+        st.caption(user_info.get('email'))
         
     if st.sidebar.button("Log Out", use_container_width=True):
         st.session_state.authenticator.logout()
+        st.session_state['guest_mode'] = False
         st.rerun()
 
 # --- 4. Core GPX Processing Engine ---
