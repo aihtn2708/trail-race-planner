@@ -40,7 +40,7 @@ st.sidebar.title("Account Access")
 if not st.session_state.get('connected', False):
     st.sidebar.markdown("Choose how you want to continue:")
     
-    # Create two equal-width columns in the sidebar
+    # Create side-by-side buttons
     col1, col2 = st.sidebar.columns(2)
     
     with col1:
@@ -50,24 +50,24 @@ if not st.session_state.get('connected', False):
             st.rerun()
             
     with col2:
-        # The Google Login button (automatically handles its own styling)
+        # The Google Login button
         st.session_state.authenticator.login()
         
     st.sidebar.divider()
     
-    # Contextual message for Guests
+    # Visual confirmation for Guest Mode
     if st.session_state.get('guest_mode', False):
-         st.sidebar.info("✨ **Guest Mode Active**\nYou can plan races and export CSVs, but saving to a profile requires a Google login.")
+         st.sidebar.info("✨ **Guest Mode Active**\nPlans can be exported as CSV, but saving requires a login.")
 
 else:
-    # User is logged in!
+    # Authenticated View
     user_info = st.session_state['user_info']
     
-    # Profile Header
-    col_img, col_txt = st.sidebar.columns([1, 3])
-    with col_img:
+    # Clean profile header
+    prof_col1, prof_col2 = st.sidebar.columns([1, 3])
+    with prof_col1:
         st.image(user_info.get('picture'), width=45)
-    with col_txt:
+    with prof_col2:
         st.write(f"**{user_info.get('name')}**")
         st.caption(user_info.get('email'))
         
