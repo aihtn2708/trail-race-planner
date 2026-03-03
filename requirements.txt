@@ -4,3 +4,4 @@ pandas
 plotly
 streamlit-google-auth
 bcrypt
+io
