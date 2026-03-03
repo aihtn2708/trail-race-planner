@@ -4,61 +4,59 @@ import pandas as pd
 import plotly.express as px
 import sqlite3
 import json
+from streamlit_google_auth import Authenticate
 
 st.set_page_config(page_title="Trail Race Planner", layout="wide")
 
-# --- 1. Database Setup for Saving Plans ---
+# --- 1. Database Setup (Simplified to just Email mapping) ---
 def init_db():
     conn = sqlite3.connect('races.db')
     c = conn.cursor()
+    # We no longer need a users table for passwords!
+    # We just link saved races directly to the Google Email.
     c.execute('''CREATE TABLE IF NOT EXISTS saved_races
-                 (username TEXT, race_name TEXT, plan_json TEXT)''')
+                 (email TEXT, race_name TEXT, plan_json TEXT)''')
     conn.commit()
     conn.close()
 
 init_db()
 
-def save_race_to_db(username, race_name, df):
-    conn = sqlite3.connect('races.db')
-    c = conn.cursor()
-    # Convert dataframe to JSON for easy storage
-    plan_json = df.to_json(orient='records')
-    c.execute("INSERT INTO saved_races VALUES (?, ?, ?)", (username, race_name, plan_json))
-    conn.commit()
-    conn.close()
+# --- 2. Initialize Google Authenticator ---
+# Make sure 'google_credentials.json' is in your project folder
+if 'authenticator' not in st.session_state:
+    st.session_state.authenticator = Authenticate(
+        secret_credentials_path='google_credentials.json',
+        cookie_name='trail_planner_auth',
+        cookie_key='super_secret_key_change_me', # Change this to a random string!
+        redirect_uri='https://trail-race-planner.streamlit.app'      # Update url of streamlit
+    )
 
-# --- 2. Authentication State ---
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
-    st.session_state.username = ""
+# Catch the login event when Google redirects back to the app
+st.session_state.authenticator.check_authentification()
 
-# --- 3. Sidebar: Login vs Guest Mode ---
+# --- 3. Sidebar: Google Login Flow ---
 st.sidebar.title("Account")
 
-if not st.session_state.logged_in:
-    auth_tabs = st.sidebar.tabs(["Continue as Guest", "Login"])
+if not st.session_state.get('connected', False):
+    st.sidebar.write("Guest mode active. You can upload and export CSVs, but plans won't be saved.")
+    st.sidebar.divider()
+    st.sidebar.write("Log in to save your race plans.")
     
-    with auth_tabs[0]:
-        st.write("Guest mode active. You can upload and export CSVs, but plans won't be saved.")
-        
-    with auth_tabs[1]:
-        st.write("Log in to save your race plans.")
-        user_input = st.text_input("Username")
-        pwd_input = st.text_input("Password", type="password")
-        if st.button("Log In"):
-            # Simple mock login for demonstration
-            if user_input: 
-                st.session_state.logged_in = True
-                st.session_state.username = user_input
-                st.rerun()
+    # Renders the Google Login Button
+    st.session_state.authenticator.login()
 else:
-    st.sidebar.success(f"Welcome back, {st.session_state.username}!")
+    # User is logged in via Google! Extract their info.
+    user_info = st.session_state['user_info']
+    google_email = user_info.get('email')
+    
+    st.sidebar.image(user_info.get('picture'), width=50)
+    st.sidebar.success(f"Welcome, {user_info.get('name')}!")
+    
     if st.sidebar.button("Log Out"):
-        st.session_state.logged_in = False
-        st.session_state.username = ""
+        st.session_state.authenticator.logout()
         st.rerun()
 
-# --- 4. Core GPX Processing (Simplified from previous) ---
+# --- 4. Core GPX Processing Engine ---
 @st.cache_data
 def process_gpx(file_bytes):
     gpx = gpxpy.parse(file_bytes)
@@ -90,8 +88,10 @@ def process_gpx(file_bytes):
 # --- 5. Main App UI ---
 st.title("🏔️ Trail Race Planner")
 
-# If logged in, use tabs to separate "New Planner" and "Saved Races"
-if st.session_state.logged_in:
+# Use Google 'connected' state to toggle features
+is_logged_in = st.session_state.get('connected', False)
+
+if is_logged_in:
     app_tabs = st.tabs(["Plan New Race", "My Saved Races"])
     active_tab = app_tabs[0]
     saved_tab = app_tabs[1]
@@ -104,12 +104,11 @@ with active_tab:
     if uploaded_file is not None:
         plan_df, raw_df = process_gpx(uploaded_file.getvalue())
         
-        # Course Profile Graph
         st.subheader("Course Profile")
+        
         fig = px.area(raw_df, x='distance_m', y='elevation', labels={'distance_m': 'Distance (m)', 'elevation': 'Elevation (m)'})
         st.plotly_chart(fig, use_container_width=True)
         
-        # Strategy Table
         st.subheader("Race Strategy")
         plan_df.insert(0, 'KM', plan_df['km_segment'])
         plan_df = plan_df.drop('km_segment', axis=1)
@@ -119,38 +118,34 @@ with active_tab:
         
         edited_df = st.data_editor(plan_df, hide_index=True, use_container_width=True)
         
-        # Download CSV (Available to everyone)
-        st.download_button(
-            label="Download as CSV",
-            data=edited_df.to_csv(index=False).encode('utf-8'),
-            file_name='race_plan.csv',
-            mime='text/csv'
-        )
-        
-        # SAVE FEATURE (Only available if logged in)
-        if st.session_state.logged_in:
+        if is_logged_in:
             st.divider()
             st.subheader("💾 Save to Profile")
             race_name = st.text_input("Give this race a name (e.g., UTMB 2026)")
             if st.button("Save Race Plan"):
                 if race_name:
-                    save_race_to_db(st.session_state.username, race_name, edited_df)
+                    conn = sqlite3.connect('races.db')
+                    c = conn.cursor()
+                    # Save the data using the Google email we extracted earlier
+                    c.execute("INSERT INTO saved_races (email, race_name, plan_json) VALUES (?, ?, ?)", 
+                              (google_email, race_name, edited_df.to_json(orient='records')))
+                    conn.commit()
+                    conn.close()
                     st.success(f"'{race_name}' saved successfully!")
                 else:
                     st.warning("Please enter a race name.")
 
-# --- 6. Saved Races View (Only for Logged In Users) ---
-if st.session_state.logged_in:
+# --- 6. Saved Races View (Logged In Only) ---
+if is_logged_in:
     with saved_tab:
         st.subheader("Your Saved Races")
         conn = sqlite3.connect('races.db')
-        saved_data = pd.read_sql_query(f"SELECT race_name, plan_json FROM saved_races WHERE username='{st.session_state.username}'", conn)
+        saved_data = pd.read_sql_query(f"SELECT race_name, plan_json FROM saved_races WHERE email='{google_email}'", conn)
         conn.close()
         
         if not saved_data.empty:
             for index, row in saved_data.iterrows():
                 with st.expander(f"🏁 {row['race_name']}"):
-                    # Reconstruct dataframe from saved JSON
                     reconstructed_df = pd.read_json(row['plan_json'], orient='records')
                     st.dataframe(reconstructed_df, hide_index=True, use_container_width=True)
         else:
