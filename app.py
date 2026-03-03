@@ -46,7 +46,14 @@ def send_reset_email(to_email, temp_password):
     if not SENDER_EMAIL or not SENDER_APP_PASSWORD:
         # Fallback for testing if email is not configured yet
         return "SIMULATED"
-        
+def update_user_password(email, new_password):
+    conn = sqlite3.connect('races.db')
+    c = conn.cursor()
+    new_hash = hash_password(new_password)
+    c.execute("UPDATE users SET password_hash=? WHERE email=?", (new_hash, email))
+    conn.commit()
+    conn.close()
+    
     msg = EmailMessage()
     msg.set_content(f"Your temporary password is: {temp_password}\n\nPlease log in and update your password.")
     msg['Subject'] = 'Password Reset - Trail Race Planner'
@@ -193,9 +200,10 @@ def process_gpx(file_bytes):
 st.title("🏔️ Trail Race Planner")
 
 if st.session_state.logged_in:
-    app_tabs = st.tabs(["Plan New Race", "My Saved Races"])
+    app_tabs = st.tabs(["Plan New Race", "My Saved Races", "Account Settings"])
     active_tab = app_tabs[0]
     saved_tab = app_tabs[1]
+    settings_tab = app_tabs[2]
 else:
     active_tab = st.container()
 
@@ -248,3 +256,32 @@ if st.session_state.logged_in:
                     st.dataframe(reconstructed_df, hide_index=True, use_container_width=True)
         else:
             st.info("You haven't saved any races yet.")
+            
+    with settings_tab:
+            st.subheader("🔐 Change Your Password")
+            st.info("Since you logged in with a temporary password, it is highly recommended to change it now.")
+            
+            with st.form("change_password_form"):
+                current_pwd = st.text_input("Current Password", type="password")
+                new_pwd = st.text_input("New Password", type="password")
+                confirm_pwd = st.text_input("Confirm New Password", type="password")
+                
+                submit_change = st.form_submit_button("Update Password")
+                
+                if submit_change:
+                    # 1. Verify Current Password
+                    conn = sqlite3.connect('races.db')
+                    c = conn.cursor()
+                    c.execute("SELECT password_hash FROM users WHERE email=?", (st.session_state.email,))
+                    stored_hash = c.fetchone()[0]
+                    conn.close()
+                    
+                    if not verify_password(current_pwd, stored_hash):
+                        st.error("The current password you entered is incorrect.")
+                    elif new_pwd != confirm_pwd:
+                        st.error("New passwords do not match.")
+                    elif len(new_pwd) < 8:
+                        st.error("New password must be at least 8 characters long.")
+                    else:
+                        update_user_password(st.session_state.email, new_pwd)
+                        st.success("Password updated successfully! Next time you log in, use your new password.")
