@@ -363,11 +363,13 @@ if st.session_state.logged_in:
             for index, row in saved_data.iterrows():
                 with st.expander(f"🏁 {row['race_name']}"):
                     
-                    # 🚀 NEW: Display the analytical metadata
+                    # 🚀 NEW: Display the analytical metadata safely
                     created_date = pd.to_datetime(row['created_at']).strftime('%Y-%m-%d') if pd.notnull(row.get('created_at')) else "Unknown Date"
-                    dist_km = row.get('distance_km', 0)
-                    gain_m = row.get('elevation_gain_m', 0)
-                    est_time = row.get('finish_time', 'N/A')
+                    
+                    # The "or 0.0" protects against older NULL entries in the database
+                    dist_km = float(row.get('distance_km') or 0.0)
+                    gain_m = int(row.get('elevation_gain_m') or 0)
+                    est_time = row.get('finish_time') or 'N/A'
                     
                     st.caption(f"**Saved:** {created_date} &nbsp;|&nbsp; **Distance:** {dist_km:.2f} km &nbsp;|&nbsp; **Gain:** {gain_m} m &nbsp;|&nbsp; **ETA:** {est_time}")
                     st.divider()
