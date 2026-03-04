@@ -337,10 +337,14 @@ with active_tab:
             if st.button("Save Race Plan", width="stretch"):
                 if race_name:
                     try:
+                        # 🚀 UPDATED: Saving the extra analytical data
                         supabase.table('saved_races').insert({
                             'email': st.session_state.email,
                             'race_name': race_name,
-                            'plan_json': final_display_df.to_json(orient='records')
+                            'plan_json': final_display_df.to_json(orient='records'),
+                            'distance_km': float(total_dist),
+                            'elevation_gain_m': int(total_gain),
+                            'finish_time': total_finish_time
                         }).execute()
                         st.success(f"'{race_name}' saved successfully to Supabase!")
                     except Exception as e:
@@ -358,6 +362,16 @@ if st.session_state.logged_in:
         if not saved_data.empty:
             for index, row in saved_data.iterrows():
                 with st.expander(f"🏁 {row['race_name']}"):
+                    
+                    # 🚀 NEW: Display the analytical metadata
+                    created_date = pd.to_datetime(row['created_at']).strftime('%Y-%m-%d') if pd.notnull(row.get('created_at')) else "Unknown Date"
+                    dist_km = row.get('distance_km', 0)
+                    gain_m = row.get('elevation_gain_m', 0)
+                    est_time = row.get('finish_time', 'N/A')
+                    
+                    st.caption(f"**Saved:** {created_date} &nbsp;|&nbsp; **Distance:** {dist_km:.2f} km &nbsp;|&nbsp; **Gain:** {gain_m} m &nbsp;|&nbsp; **ETA:** {est_time}")
+                    st.divider()
+
                     reconstructed_df = pd.read_json(io.StringIO(row['plan_json']), orient='records')
                     
                     if is_mobile:
@@ -378,16 +392,25 @@ if st.session_state.logged_in:
                     else:
                         st.dataframe(reconstructed_df, hide_index=True, width="stretch")
                     
-                    # Saved Race Export Button
-                    saved_csv = reconstructed_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label=f"Download {row['race_name']} (CSV)",
-                        data=saved_csv,
-                        file_name=f"{row['race_name'].replace(' ', '_').lower()}.csv",
-                        mime="text/csv",
-                        key=f"download_{row['id']}",
-                        width="stretch"
-                    )
+                    # 🚀 NEW: Side-by-Side Download and Delete Buttons
+                    col_dl, col_del = st.columns(2)
+                    with col_dl:
+                        saved_csv = reconstructed_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label=f"📥 Download CSV",
+                            data=saved_csv,
+                            file_name=f"{row['race_name'].replace(' ', '_').lower()}.csv",
+                            mime="text/csv",
+                            key=f"download_{row['id']}",
+                            width="stretch"
+                        )
+                    with col_del:
+                        if st.button(f"🗑️ Delete Race", key=f"delete_{row['id']}", width="stretch"):
+                            try:
+                                supabase.table('saved_races').delete().eq('id', row['id']).execute()
+                                st.rerun() # Refresh the page immediately
+                            except Exception as e:
+                                st.error(f"Failed to delete: {e}")
         else:
             st.info("You haven't saved any races yet.")
             
@@ -418,7 +441,7 @@ if st.session_state.logged_in:
             try:
                 users_res = supabase.table('users').select('*', count='exact').execute()
                 plans_res = supabase.table('saved_races').select('*', count='exact').execute()
-                top_races_res = supabase.table('saved_races').select('email, race_name').order('id', desc=True).limit(5).execute()
+                top_races_res = supabase.table('saved_races').select('email, race_name, distance_km, finish_time').order('id', desc=True).limit(5).execute()
                 
                 col1, col2 = st.columns(2)
                 col1.metric("👥 Total Registered Users", users_res.count)
@@ -426,6 +449,7 @@ if st.session_state.logged_in:
                 
                 st.divider()
                 st.write("**Recent App Activity (Last 5 Plans Created):**")
+                # Showing the new analytics data in the admin table!
                 st.dataframe(pd.DataFrame(top_races_res.data), hide_index=True, width="stretch")
             except Exception as e:
-                st.error("Could not fetch metrics. Check if Row Level Security is disabled.")
+                st.error(f"Could not fetch metrics. {e}")
