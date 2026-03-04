@@ -5,3 +5,4 @@ plotly
 streamlit-google-auth
 bcrypt
 io
+supabase
