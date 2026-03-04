@@ -11,15 +11,17 @@ import string
 import io
 from supabase import create_client, Client
 
+# --- Page Configuration ---
 st.set_page_config(page_title="Trail Race Planner", layout="wide", initial_sidebar_state="collapsed")
 
-# --- Device Detection ---
+# --- Device Detection (Mobile vs Desktop) ---
 def check_if_mobile():
     try:
         user_agent = st.context.headers.get("user-agent", "").lower()
         return any(keyword in user_agent for keyword in ['mobile', 'android', 'iphone', 'ipad'])
     except:
         return False
+        
 is_mobile = check_if_mobile()
 
 # --- Load Secrets & Initialize Supabase ---
@@ -30,11 +32,10 @@ try:
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except KeyError as e:
-    st.error(f"Missing Secret: {e}. Please configure your Streamlit Secrets.")
+    st.error(f"Missing Secret: {e}. Please configure your Streamlit Secrets (.streamlit/secrets.toml).")
     st.stop()
 
 # --- Time Math Helpers ---
-# (Keep your existing pace_to_seconds and seconds_to_eta functions here)
 def pace_to_seconds(pace_str):
     try:
         parts = str(pace_str).split(':')
@@ -50,11 +51,9 @@ def seconds_to_eta(total_seconds):
 
 # --- 1. Supabase Database & Security Functions ---
 def hash_password(password):
-    # bcrypt returns bytes, Supabase needs a string. So we decode it.
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
 def verify_password(password, hashed_str):
-    # Supabase returns a string, bcrypt needs bytes to verify. So we encode it.
     return bcrypt.checkpw(password.encode('utf-8'), hashed_str.encode('utf-8'))
 
 def is_valid_email(email):
@@ -105,7 +104,7 @@ if not st.session_state.logged_in:
             st.session_state.guest_mode = False
 
     if st.session_state.guest_mode:
-        st.sidebar.info("✨ **Guest Mode Active**\nYou can plan races, but saving requires an account.")
+        st.sidebar.info("✨ **Guest Mode Active**\nYou can plan and export races, but saving requires an account.")
     else:
         auth_tabs = st.sidebar.tabs(["Log In", "Sign Up"])
         
@@ -113,10 +112,8 @@ if not st.session_state.logged_in:
             login_email = st.text_input("Email", key="log_email")
             login_pwd = st.text_input("Password", type="password", key="log_pwd")
             
-            if st.button("Submit Login"):
-                # Supabase Query: Get user by email
+            if st.button("Submit Login", width="stretch"):
                 res = supabase.table('users').select('password_hash').eq('email', login_email).execute()
-                
                 if len(res.data) > 0 and verify_password(login_pwd, res.data[0]['password_hash']):
                     st.session_state.logged_in = True
                     st.session_state.email = login_email
@@ -126,12 +123,11 @@ if not st.session_state.logged_in:
             
             with st.expander("Forgot Password?"):
                 reset_email = st.text_input("Enter your account email")
-                if st.button("Reset Password"):
+                if st.button("Reset Password", width="stretch"):
                     res = supabase.table('users').select('email').eq('email', reset_email).execute()
                     if len(res.data) > 0:
                         temp_pwd = generate_temp_password()
                         update_user_password(reset_email, temp_pwd)
-                        
                         email_status = send_reset_email(reset_email, temp_pwd)
                         if email_status == "SUCCESS":
                             st.success("A temporary password has been sent to your email.")
@@ -146,13 +142,12 @@ if not st.session_state.logged_in:
             reg_email = st.text_input("Email", key="reg_email")
             reg_pwd = st.text_input("Password", type="password", key="reg_pwd")
             
-            if st.button("Create Account"):
+            if st.button("Create Account", width="stretch"):
                 if not is_valid_email(reg_email):
                     st.error("Enter a valid email.")
                 elif len(reg_pwd) < 6:
                     st.error("Password must be at least 6 characters.")
                 else:
-                    # Supabase Query: Check if user already exists
                     existing = supabase.table('users').select('email').eq('email', reg_email).execute()
                     if len(existing.data) > 0:
                         st.error("An account with this email already exists.")
@@ -162,7 +157,6 @@ if not st.session_state.logged_in:
                             'password_hash': hash_password(reg_pwd)
                         }).execute()
                         st.success("Account created! Please log in.")
-
 else:
     st.sidebar.success(f"Logged in as:\n**{st.session_state.email}**")
     if st.sidebar.button("Log Out", width="stretch"):
@@ -172,7 +166,6 @@ else:
         st.rerun()
 
 # --- 4. Core GPX Processing Engine ---
-# (Keep your existing process_gpx function here entirely unmodified)
 @st.cache_data
 def process_gpx(file_bytes):
     gpx = gpxpy.parse(file_bytes)
@@ -198,7 +191,7 @@ def process_gpx(file_bytes):
     return plan_df, df
 
 # --- 5. Main App UI ---
-ADMIN_EMAIL = "aihtn2708@gmail.com"
+ADMIN_EMAIL = "aihtn2708@gmail.com" # <-- Update this to your real email!
 st.title("🏔️ Trail Race Planner")
 
 if st.session_state.logged_in:
@@ -215,36 +208,150 @@ else:
     active_tab = st.container()
 
 with active_tab:
-    # (Keep your entire GPX upload, Course Profile, and Dual UI Logic here)
-    # The only change in this tab is replacing the SQLite INSERT logic in the "Save" button:
-    
-    # ... [YOUR EXISTING UI CODE] ...
-    
-        # --- SUPABASE SAVE FEATURE UPDATE ---
+    uploaded_file = st.file_uploader("Upload GPX File")
+
+    if uploaded_file is not None:
+        if 'last_file' not in st.session_state or st.session_state.last_file != uploaded_file.name:
+            plan_df, raw_df = process_gpx(uploaded_file.getvalue())
+            plan_df.insert(0, 'KM', plan_df['km_segment'])
+            plan_df = plan_df.drop('km_segment', axis=1)
+            plan_df['Pace (mm:ss)'] = "06:00" 
+            plan_df['💧 Water'] = False
+            plan_df['🍯 Gel'] = False
+            plan_df['🍌 Food'] = False
+            plan_df['🧂 Salt'] = False
+            plan_df['Notes'] = ""
+            
+            st.session_state.race_plan = plan_df
+            st.session_state.raw_df = raw_df
+            st.session_state.last_file = uploaded_file.name
+            
+        df = st.session_state.race_plan
+        raw_df = st.session_state.raw_df
+        
+        st.subheader("Race Summary")
+        total_dist = raw_df['distance_m'].max() / 1000
+        total_gain = df['Gain_m'].sum()
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Distance", f"{total_dist:.2f} km")
+        col2.metric("Total Elevation Gain", f"{total_gain} m")
+        eta_metric = col3.empty()
+        
+        st.subheader("Course Profile")
+        fig = px.area(raw_df, x='distance_m', y='elevation', labels={'distance_m': 'Distance (m)', 'elevation': 'Elevation (m)'})
+        fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=250)
+        st.plotly_chart(fig, width="stretch")
+        
+        st.subheader("Race Strategy")
+        
+        # --- 🔀 DUAL UI ROUTING ---
+        if is_mobile:
+            st.info("📱 **Mobile View:** Update multiple kilometers at once using the form below.")
+            with st.form("bulk_edit_form"):
+                col_k1, col_k2 = st.columns(2)
+                max_km = int(df['KM'].max())
+                with col_k1:
+                    start_km = st.number_input("From KM", min_value=1, max_value=max_km, value=1)
+                with col_k2:
+                    end_km = st.number_input("To KM", min_value=1, max_value=max_km, value=max_km)
+                    
+                new_pace = st.text_input("New Pace (mm:ss)", "06:00")
+                nutrition_opts = st.multiselect("Nutrition", ["💧 Water", "🍯 Gel", "🍌 Food", "🧂 Salt"])
+                new_notes = st.text_input("Notes (Optional)")
+                
+                submit_edits = st.form_submit_button("Apply to Plan", width="stretch")
+                
+                if submit_edits:
+                    if re.match(r'^\d{1,2}:\d{2}$', new_pace):
+                        mask = (df['KM'] >= start_km) & (df['KM'] <= end_km)
+                        df.loc[mask, 'Pace (mm:ss)'] = new_pace
+                        if new_notes: df.loc[mask, 'Notes'] = new_notes
+                        df.loc[mask, ['💧 Water', '🍯 Gel', '🍌 Food', '🧂 Salt']] = False
+                        for opt in nutrition_opts: df.loc[mask, opt] = True
+                        st.session_state.race_plan = df
+                        st.rerun()
+                    else:
+                        st.error("⚠️ Please format pace strictly as MM:SS (e.g., 08:30)")
+            edited_df = df.copy()
+        else:
+            st.info("💻 **Desktop View:** Click directly into the table cells below to edit your pace and nutrition.")
+            edited_df = st.data_editor(
+                df, 
+                column_config={
+                    "KM": st.column_config.NumberColumn(disabled=True),
+                    "Gain_m": st.column_config.NumberColumn("Gain (m)", disabled=True),
+                    "Loss_m": st.column_config.NumberColumn("Loss (m)", disabled=True),
+                    "Pace (mm:ss)": st.column_config.TextColumn("Pace (mm:ss)"),
+                },
+                hide_index=True, 
+                width="stretch"
+            )
+            st.session_state.race_plan = edited_df
+
+        # --- Reactive ETA Calculations ---
+        edited_df['pace_sec'] = edited_df['Pace (mm:ss)'].apply(pace_to_seconds)
+        edited_df['cum_sec'] = edited_df['pace_sec'].cumsum()
+        edited_df['ETA'] = edited_df['cum_sec'].apply(seconds_to_eta)
+        
+        total_finish_time = edited_df['ETA'].iloc[-1] if not edited_df.empty else "00:00:00"
+        eta_metric.metric("Estimated Finish Time", total_finish_time)
+        
+        cols = ['KM', 'Gain_m', 'Loss_m', 'Pace (mm:ss)', 'ETA', '💧 Water', '🍯 Gel', '🍌 Food', '🧂 Salt', 'Notes']
+        final_display_df = edited_df[cols]
+        
+        if is_mobile:
+            st.dataframe(
+                final_display_df, hide_index=True, width="stretch",
+                column_config={
+                    "KM": st.column_config.NumberColumn("KM", width="small"),
+                    "Gain_m": st.column_config.NumberColumn("🔺", width="small"),
+                    "Loss_m": st.column_config.NumberColumn("🔻", width="small"),
+                    "Pace (mm:ss)": st.column_config.TextColumn("Pace", width="small"),
+                    "ETA": st.column_config.TextColumn("ETA", width="small"),
+                    "💧 Water": st.column_config.CheckboxColumn("💧", width="small"),
+                    "🍯 Gel": st.column_config.CheckboxColumn("🍯", width="small"),
+                    "🍌 Food": st.column_config.CheckboxColumn("🍌", width="small"),
+                    "🧂 Salt": st.column_config.CheckboxColumn("🧂", width="small"),
+                }
+            )
+
+        # --- 📥 CSV EXPORT (Available to Everyone) ---
+        st.divider()
+        st.subheader("📥 Export Your Plan")
+        st.info("Download your strategy to print out or use in Excel.")
+        csv_data = final_display_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download as CSV",
+            data=csv_data,
+            file_name="trail_race_strategy.csv",
+            mime="text/csv",
+            width="stretch"
+        )
+
+        # --- 💾 SUPABASE SAVE FEATURE (Logged In Users Only) ---
         if st.session_state.logged_in:
             st.divider()
-            st.subheader("💾 Save to Profile")
+            st.subheader("💾 Save to Cloud Profile")
             race_name = st.text_input("Give this race a name (e.g., UTMB 2026)")
             if st.button("Save Race Plan", width="stretch"):
                 if race_name:
-                    # Replace SQLite insert with Supabase insert
                     try:
                         supabase.table('saved_races').insert({
                             'email': st.session_state.email,
                             'race_name': race_name,
                             'plan_json': final_display_df.to_json(orient='records')
                         }).execute()
-                        st.success(f"'{race_name}' saved successfully to cloud!")
+                        st.success(f"'{race_name}' saved successfully to Supabase!")
                     except Exception as e:
                         st.error(f"Failed to save to cloud: {e}")
                 else:
                     st.warning("Please enter a race name.")
 
+# --- Saved Races & Profile Management ---
 if st.session_state.logged_in:
     with saved_tab:
         st.subheader("Your Saved Races")
-        
-        # --- SUPABASE RETRIEVE FEATURE UPDATE ---
         res = supabase.table('saved_races').select('*').eq('email', st.session_state.email).order('id', desc=True).execute()
         saved_data = pd.DataFrame(res.data)
         
@@ -252,20 +359,35 @@ if st.session_state.logged_in:
             for index, row in saved_data.iterrows():
                 with st.expander(f"🏁 {row['race_name']}"):
                     reconstructed_df = pd.read_json(io.StringIO(row['plan_json']), orient='records')
+                    
                     if is_mobile:
-                        st.dataframe(reconstructed_df, hide_index=True, width="stretch", column_config={
-                            "KM": st.column_config.NumberColumn("KM", width="small"),
-                            "Gain_m": st.column_config.NumberColumn("🔺", width="small"),
-                            "Loss_m": st.column_config.NumberColumn("🔻", width="small"),
-                            "Pace (mm:ss)": st.column_config.TextColumn("Pace", width="small"),
-                            "ETA": st.column_config.TextColumn("ETA", width="small"),
-                            "💧 Water": st.column_config.CheckboxColumn("💧", width="small"),
-                            "🍯 Gel": st.column_config.CheckboxColumn("🍯", width="small"),
-                            "🍌 Food": st.column_config.CheckboxColumn("🍌", width="small"),
-                            "🧂 Salt": st.column_config.CheckboxColumn("🧂", width="small"),
-                        })
+                        st.dataframe(
+                            reconstructed_df, hide_index=True, width="stretch",
+                            column_config={
+                                "KM": st.column_config.NumberColumn("KM", width="small"),
+                                "Gain_m": st.column_config.NumberColumn("🔺", width="small"),
+                                "Loss_m": st.column_config.NumberColumn("🔻", width="small"),
+                                "Pace (mm:ss)": st.column_config.TextColumn("Pace", width="small"),
+                                "ETA": st.column_config.TextColumn("ETA", width="small"),
+                                "💧 Water": st.column_config.CheckboxColumn("💧", width="small"),
+                                "🍯 Gel": st.column_config.CheckboxColumn("🍯", width="small"),
+                                "🍌 Food": st.column_config.CheckboxColumn("🍌", width="small"),
+                                "🧂 Salt": st.column_config.CheckboxColumn("🧂", width="small"),
+                            }
+                        )
                     else:
                         st.dataframe(reconstructed_df, hide_index=True, width="stretch")
+                    
+                    # Saved Race Export Button
+                    saved_csv = reconstructed_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label=f"Download {row['race_name']} (CSV)",
+                        data=saved_csv,
+                        file_name=f"{row['race_name'].replace(' ', '_').lower()}.csv",
+                        mime="text/csv",
+                        key=f"download_{row['id']}",
+                        width="stretch"
+                    )
         else:
             st.info("You haven't saved any races yet.")
             
@@ -290,20 +412,20 @@ if st.session_state.logged_in:
                     update_user_password(st.session_state.email, new_pwd)
                     st.success("Password updated successfully! Use your new password next time you log in.")
 
-    # --- SUPABASE ADMIN DASHBOARD ---
     if admin_tab:
         with admin_tab:
             st.subheader("App Performance Metrics")
-            
-            # Fetch exact counts using Supabase built-in count feature
-            users_res = supabase.table('users').select('*', count='exact').execute()
-            plans_res = supabase.table('saved_races').select('*', count='exact').execute()
-            top_races_res = supabase.table('saved_races').select('email, race_name').order('id', desc=True).limit(5).execute()
-            
-            col1, col2 = st.columns(2)
-            col1.metric("👥 Total Registered Users", users_res.count)
-            col2.metric("💾 Total Saved Race Plans", plans_res.count)
-            
-            st.divider()
-            st.write("**Recent App Activity (Last 5 Plans Created):**")
-            st.dataframe(pd.DataFrame(top_races_res.data), hide_index=True, width="stretch")
+            try:
+                users_res = supabase.table('users').select('*', count='exact').execute()
+                plans_res = supabase.table('saved_races').select('*', count='exact').execute()
+                top_races_res = supabase.table('saved_races').select('email, race_name').order('id', desc=True).limit(5).execute()
+                
+                col1, col2 = st.columns(2)
+                col1.metric("👥 Total Registered Users", users_res.count)
+                col2.metric("💾 Total Saved Race Plans", plans_res.count)
+                
+                st.divider()
+                st.write("**Recent App Activity (Last 5 Plans Created):**")
+                st.dataframe(pd.DataFrame(top_races_res.data), hide_index=True, width="stretch")
+            except Exception as e:
+                st.error("Could not fetch metrics. Check if Row Level Security is disabled.")
