@@ -11,9 +11,21 @@ import random
 import string
 import io
 
-st.set_page_config(page_title="Trail Race Planner", layout="wide")
+# initial_sidebar_state="collapsed" helps hide the menu on small mobile screens
+st.set_page_config(page_title="Trail Race Planner", layout="wide", initial_sidebar_state="collapsed")
 
-# --- Configuration for Email Sending (Using Streamlit Secrets) ---
+# --- Device Detection (Mobile vs Desktop) ---
+def check_if_mobile():
+    try:
+        user_agent = st.context.headers.get("user-agent", "").lower()
+        mobile_keywords = ['mobile', 'android', 'iphone', 'ipad']
+        return any(keyword in user_agent for keyword in mobile_keywords)
+    except:
+        return False
+
+is_mobile = check_if_mobile()
+
+# --- Configuration for Email Sending ---
 try:
     SENDER_EMAIL = st.secrets["SENDER_EMAIL"]
     SENDER_APP_PASSWORD = st.secrets["SENDER_APP_PASSWORD"]
@@ -99,12 +111,10 @@ st.sidebar.title("Account Access")
 if not st.session_state.logged_in:
     col1, col2 = st.sidebar.columns(2)
     with col1:
-        # FIXED: width="stretch"
         if st.button("👤 Guest", width="stretch"):
             st.session_state.guest_mode = True
             
     with col2:
-        # FIXED: width="stretch"
         if st.button("🔒 Log In", width="stretch"):
             st.session_state.guest_mode = False
 
@@ -177,7 +187,6 @@ if not st.session_state.logged_in:
 
 else:
     st.sidebar.success(f"Logged in as:\n**{st.session_state.email}**")
-    # FIXED: width="stretch"
     if st.sidebar.button("Log Out", width="stretch"):
         st.session_state.logged_in = False
         st.session_state.email = ""
@@ -223,14 +232,33 @@ else:
     active_tab = st.container()
 
 with active_tab:
-    uploaded_file = st.file_uploader("Upload GPX File", type=["gpx"])
+    # We removed the 'type' restriction so mobile file pickers don't block GPX files
+    uploaded_file = st.file_uploader("Upload GPX File")
 
     if uploaded_file is not None:
-        plan_df, raw_df = process_gpx(uploaded_file.getvalue())
+        
+        # Load data into session state to prevent edits from erasing on rerun
+        if 'last_file' not in st.session_state or st.session_state.last_file != uploaded_file.name:
+            plan_df, raw_df = process_gpx(uploaded_file.getvalue())
+            plan_df.insert(0, 'KM', plan_df['km_segment'])
+            plan_df = plan_df.drop('km_segment', axis=1)
+            plan_df['Pace (mm:ss)'] = "06:00" 
+            plan_df['💧 Water'] = False
+            plan_df['🍯 Gel'] = False
+            plan_df['🍌 Food'] = False
+            plan_df['🧂 Salt'] = False
+            plan_df['Notes'] = ""
+            
+            st.session_state.race_plan = plan_df
+            st.session_state.raw_df = raw_df
+            st.session_state.last_file = uploaded_file.name
+            
+        df = st.session_state.race_plan
+        raw_df = st.session_state.raw_df
         
         st.subheader("Race Summary")
         total_dist = raw_df['distance_m'].max() / 1000
-        total_gain = plan_df['Gain_m'].sum()
+        total_gain = df['Gain_m'].sum()
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Distance", f"{total_dist:.2f} km")
@@ -240,35 +268,64 @@ with active_tab:
         st.subheader("Course Profile")
         fig = px.area(raw_df, x='distance_m', y='elevation', labels={'distance_m': 'Distance (m)', 'elevation': 'Elevation (m)'})
         fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=250)
-        # FIXED: width="stretch"
         st.plotly_chart(fig, width="stretch")
         
         st.subheader("Race Strategy")
         
-        plan_df.insert(0, 'KM', plan_df['km_segment'])
-        plan_df = plan_df.drop('km_segment', axis=1)
-        plan_df['Pace (mm:ss)'] = "06:00" 
-        plan_df['💧 Water'] = False
-        plan_df['🍯 Gel'] = False
-        plan_df['🍌 Food'] = False
-        plan_df['🧂 Salt'] = False
-        plan_df['Notes'] = ""
-        
-        st.markdown("**Edit your pace and check off your nutrition plan. The ETA will update automatically.**")
-        
-        # FIXED: width="stretch"
-        edited_df = st.data_editor(
-            plan_df, 
-            column_config={
-                "KM": st.column_config.NumberColumn(disabled=True),
-                "Gain_m": st.column_config.NumberColumn("Gain (m)", disabled=True),
-                "Loss_m": st.column_config.NumberColumn("Loss (m)", disabled=True),
-                "Pace (mm:ss)": st.column_config.TextColumn("Pace (mm:ss)"),
-            },
-            hide_index=True, 
-            width="stretch"
-        )
-        
+        # --- 🔀 DUAL UI ROUTING ---
+        if is_mobile:
+            st.info("📱 **Mobile View:** Update multiple kilometers at once using the form below.")
+            
+            with st.form("bulk_edit_form"):
+                col_k1, col_k2 = st.columns(2)
+                max_km = int(df['KM'].max())
+                with col_k1:
+                    start_km = st.number_input("From KM", min_value=1, max_value=max_km, value=1)
+                with col_k2:
+                    end_km = st.number_input("To KM", min_value=1, max_value=max_km, value=max_km)
+                    
+                new_pace = st.text_input("New Pace (mm:ss)", "06:00")
+                nutrition_opts = st.multiselect("Nutrition", ["💧 Water", "🍯 Gel", "🍌 Food", "🧂 Salt"])
+                new_notes = st.text_input("Notes (Optional)")
+                
+                submit_edits = st.form_submit_button("Apply to Plan", width="stretch")
+                
+                if submit_edits:
+                    if re.match(r'^\d{1,2}:\d{2}$', new_pace):
+                        mask = (df['KM'] >= start_km) & (df['KM'] <= end_km)
+                        df.loc[mask, 'Pace (mm:ss)'] = new_pace
+                        if new_notes: df.loc[mask, 'Notes'] = new_notes
+                        df.loc[mask, ['💧 Water', '🍯 Gel', '🍌 Food', '🧂 Salt']] = False
+                        for opt in nutrition_opts: df.loc[mask, opt] = True
+                        
+                        st.session_state.race_plan = df
+                        st.rerun()
+                    else:
+                        st.error("⚠️ Please format pace strictly as MM:SS (e.g., 08:30)")
+            
+            # Read-only swipable dataframe for mobile
+            edited_df = df.copy()
+
+        else:
+            st.info("💻 **Desktop View:** Click directly into the table cells below to edit your pace and nutrition.")
+            
+            # Interactive data editor for Desktop
+            edited_df = st.data_editor(
+                df, 
+                column_config={
+                    "KM": st.column_config.NumberColumn(disabled=True),
+                    "Gain_m": st.column_config.NumberColumn("Gain (m)", disabled=True),
+                    "Loss_m": st.column_config.NumberColumn("Loss (m)", disabled=True),
+                    "Pace (mm:ss)": st.column_config.TextColumn("Pace (mm:ss)"),
+                },
+                hide_index=True, 
+                width="stretch"
+            )
+            # Save desktop edits back to session state
+            st.session_state.race_plan = edited_df
+
+        # --- Reactive ETA Calculations (Runs for both UIs) ---
+        # We work off `edited_df` to do the math
         edited_df['pace_sec'] = edited_df['Pace (mm:ss)'].apply(pace_to_seconds)
         edited_df['cum_sec'] = edited_df['pace_sec'].cumsum()
         edited_df['ETA'] = edited_df['cum_sec'].apply(seconds_to_eta)
@@ -279,11 +336,30 @@ with active_tab:
         cols = ['KM', 'Gain_m', 'Loss_m', 'Pace (mm:ss)', 'ETA', '💧 Water', '🍯 Gel', '🍌 Food', '🧂 Salt', 'Notes']
         final_display_df = edited_df[cols]
         
+        # If mobile, render the final calculated table as read-only here so ETA is visible
+        if is_mobile:
+            st.dataframe(
+                final_display_df, 
+                hide_index=True, 
+                width="stretch",
+                column_config={
+                    "KM": st.column_config.NumberColumn("KM", width="small"),
+                    "Gain_m": st.column_config.NumberColumn("🔺", width="small"),
+                    "Loss_m": st.column_config.NumberColumn("🔻", width="small"),
+                    "Pace (mm:ss)": st.column_config.TextColumn("Pace", width="small"),
+                    "ETA": st.column_config.TextColumn("ETA", width="small"),
+                    "💧 Water": st.column_config.CheckboxColumn("💧", width="small"),
+                    "🍯 Gel": st.column_config.CheckboxColumn("🍯", width="small"),
+                    "🍌 Food": st.column_config.CheckboxColumn("🍌", width="small"),
+                    "🧂 Salt": st.column_config.CheckboxColumn("🧂", width="small"),
+                }
+            )
+        
         if st.session_state.logged_in:
             st.divider()
             st.subheader("💾 Save to Profile")
             race_name = st.text_input("Give this race a name (e.g., UTMB 2026)")
-            if st.button("Save Race Plan"):
+            if st.button("Save Race Plan", width="stretch"):
                 if race_name:
                     conn = sqlite3.connect('races.db')
                     c = conn.cursor()
@@ -305,10 +381,27 @@ if st.session_state.logged_in:
         if not saved_data.empty:
             for index, row in saved_data.iterrows():
                 with st.expander(f"🏁 {row['race_name']}"):
-                    # FIXED: Wrapped the JSON string in io.StringIO() to prevent FutureWarnings
                     reconstructed_df = pd.read_json(io.StringIO(row['plan_json']), orient='records')
-                    # FIXED: width="stretch"
-                    st.dataframe(reconstructed_df, hide_index=True, width="stretch")
+                    
+                    if is_mobile:
+                        st.dataframe(
+                            reconstructed_df, 
+                            hide_index=True, 
+                            width="stretch",
+                            column_config={
+                                "KM": st.column_config.NumberColumn("KM", width="small"),
+                                "Gain_m": st.column_config.NumberColumn("🔺", width="small"),
+                                "Loss_m": st.column_config.NumberColumn("🔻", width="small"),
+                                "Pace (mm:ss)": st.column_config.TextColumn("Pace", width="small"),
+                                "ETA": st.column_config.TextColumn("ETA", width="small"),
+                                "💧 Water": st.column_config.CheckboxColumn("💧", width="small"),
+                                "🍯 Gel": st.column_config.CheckboxColumn("🍯", width="small"),
+                                "🍌 Food": st.column_config.CheckboxColumn("🍌", width="small"),
+                                "🧂 Salt": st.column_config.CheckboxColumn("🧂", width="small"),
+                            }
+                        )
+                    else:
+                        st.dataframe(reconstructed_df, hide_index=True, width="stretch")
         else:
             st.info("You haven't saved any races yet.")
             
@@ -321,7 +414,7 @@ if st.session_state.logged_in:
             new_pwd = st.text_input("New Password", type="password")
             confirm_pwd = st.text_input("Confirm New Password", type="password")
             
-            submit_change = st.form_submit_button("Update Password")
+            submit_change = st.form_submit_button("Update Password", width="stretch")
             
             if submit_change:
                 conn = sqlite3.connect('races.db')
