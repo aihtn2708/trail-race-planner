@@ -103,25 +103,44 @@ if not st.session_state.logged_in:
 
     if not st.session_state.guest_mode:
         t = st.sidebar.tabs(["Login", "Sign Up"])
+        
+        # --- LOGIN TAB ---
         with t[0]:
             em = st.text_input("Email", key="l_em")
             pw = st.text_input("Password", type="password", key="l_pw")
+            
             if st.button("Submit Login", width="stretch"):
-                res = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", em)])
+                # 🚀 FIX: Force lowercase and strip hidden spaces
+                clean_email = em.strip().lower() 
+                
+                res = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", clean_email)])
                 total = get_val(res, 'total', 0)
                 docs = get_val(res, 'documents', [])
                 
-                if total > 0 and verify_password(pw, get_val(docs[0], 'password_hash', '')):
-                    st.session_state.logged_in, st.session_state.email = True, em
-                    st.rerun()
-                else: 
-                    st.error("Invalid email or password.")
+                if total == 0:
+                    st.error(f"Could not find an account for: {clean_email}")
+                else:
+                    # Try a few different ways to pull the hash depending on Appwrite's format
+                    user_doc = docs[0]
+                    stored_hash = get_val(user_doc, 'password_hash')
+                    if not stored_hash and hasattr(user_doc, '__dict__'):
+                        stored_hash = user_doc.__dict__.get('password_hash')
+                    
+                    if verify_password(pw, stored_hash):
+                        st.session_state.logged_in = True
+                        st.session_state.email = clean_email
+                        st.rerun()
+                    else: 
+                        st.error("Email found, but password was incorrect.")
+                        # DEBUG: Show us what the hash looks like so we can fix it!
+                        st.info(f"Debug Info: Hash length is {len(str(stored_hash))} characters.")
             
             # --- Forgot Password Feature ---
             with st.expander("Forgot Password?"):
                 reset_em = st.text_input("Enter your account email", key="reset_em")
                 if st.button("Send Temp Password", width="stretch"):
-                    res = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", reset_em)])
+                    clean_reset = reset_em.strip().lower()
+                    res = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", clean_reset)])
                     total = get_val(res, 'total', 0)
                     docs = get_val(res, 'documents', [])
                     
@@ -136,7 +155,7 @@ if not st.session_state.logged_in:
                             data={"password_hash": hash_password(temp_pwd)}
                         )
                         
-                        email_status = send_reset_email(reset_em, temp_pwd)
+                        email_status = send_reset_email(clean_reset, temp_pwd)
                         if email_status == "SUCCESS":
                             st.success("A temporary password has been sent to your email.")
                         elif email_status == "SIMULATED":
@@ -146,21 +165,21 @@ if not st.session_state.logged_in:
                     else:
                         st.error("Email not found in our database.")
                     
+        # --- SIGN UP TAB ---
         with t[1]:
             rem = st.text_input("New Email", key="r_em")
             rpw = st.text_input("New Password", type="password", key="r_pw")
+            
             if st.button("Create Account", width="stretch"):
+                # 🚀 FIX: Force lowercase and strip hidden spaces
+                clean_new_email = rem.strip().lower()
+                
                 if len(rpw) >= 6:
-                    exists = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", rem)])
+                    exists = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", clean_new_email)])
                     if get_val(exists, 'total', 0) == 0:
-                        databases.create_document(database_id=DB_ID, collection_id=U_COL, document_id=ID.unique(), data={"email": rem, "password_hash": hash_password(rpw)})
-                        st.success("Account created! Please log in.")
+                        databases.create_document(database_id=DB_ID, collection_id=U_COL, document_id=ID.unique(), data={"email": clean_new_email, "password_hash": hash_password(rpw)})
+                        st.success("Account created! Please switch to the Login tab.")
                     else: st.error("An account with this email already exists.")
-else:
-    st.sidebar.success(f"User: {st.session_state.email}")
-    if st.sidebar.button("Log Out", width="stretch"):
-        st.session_state.logged_in = False
-        st.rerun()
 
 # --- GPX Processing ---
 @st.cache_data
