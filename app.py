@@ -40,21 +40,31 @@ except Exception as e:
     st.error(f"Appwrite Connection Error: {e}. Check your secrets!")
     st.stop()
 
-# --- 🚀 NEW: Safe Data Extractor (Fixes the TypeError) ---
+# --- Safe Data Extractor ---
 def get_val(obj, key, default=None):
-    """Safely extracts data whether Appwrite returns a dict or an object."""
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
 
 # --- Security & Time Helpers ---
-def hash_password(password): return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-def verify_password(password, hashed): return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+def hash_password(password): 
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+# 🚀 FIX: Bulletproof password verification that catches empty or bad hashes
+def verify_password(password, hashed_str):
+    if not hashed_str or not isinstance(hashed_str, str):
+        return False
+    try:
+        return bcrypt.checkpw(password.encode('utf-8'), hashed_str.encode('utf-8'))
+    except ValueError:
+        return False
+
 def pace_to_seconds(p):
     try:
         m, s = map(int, str(p).split(':'))
         return m * 60 + s
     except: return 360
+
 def seconds_to_eta(s_total):
     h, m = divmod(s_total, 3600)
     m, s = divmod(m, 60)
@@ -97,15 +107,17 @@ if not st.session_state.logged_in:
             em = st.text_input("Email", key="l_em")
             pw = st.text_input("Password", type="password", key="l_pw")
             if st.button("Submit Login", width="stretch"):
-                # 🚀 UPDATED: Using keyword arguments to fix DeprecationWarnings
                 res = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", em)])
                 total = get_val(res, 'total', 0)
                 docs = get_val(res, 'documents', [])
                 
+                # It will safely fail here if the hash is missing
                 if total > 0 and verify_password(pw, get_val(docs[0], 'password_hash', '')):
                     st.session_state.logged_in, st.session_state.email = True, em
                     st.rerun()
-                else: st.error("Invalid email or password.")
+                else: 
+                    st.error("Invalid email or password.")
+                    
         with t[1]:
             rem = st.text_input("New Email", key="r_em")
             rpw = st.text_input("New Password", type="password", key="r_pw")
@@ -131,7 +143,7 @@ def process_gpx(file_bytes):
     prev = None
     for track in gpx.tracks:
         for segment in track.segments:
-            for p in s.points:
+            for p in segment.points:
                 if prev: d_acc += p.distance_2d(prev)
                 pts.append({'dist': d_acc, 'ele': p.elevation})
                 prev = p
@@ -228,7 +240,6 @@ with active_tab:
         if st.session_state.logged_in:
             r_name = st.text_input("Race Name to Save")
             if st.button("💾 Save to Cloud", width="stretch") and r_name:
-                # 🚀 UPDATED: Using keyword arguments
                 databases.create_document(
                     database_id=DB_ID, 
                     collection_id=R_COL, 
@@ -247,12 +258,10 @@ with active_tab:
 # --- Saved Races Tab ---
 if st.session_state.logged_in:
     with saved_tab:
-        # 🚀 UPDATED: Using keyword arguments
         res = databases.list_documents(database_id=DB_ID, collection_id=R_COL, queries=[Query.equal("email", st.session_state.email), Query.order_desc("$createdAt")])
         docs = get_val(res, 'documents', [])
         
         for d in docs:
-            # 🚀 UPDATED: Safely extracting data
             r_name = get_val(d, 'race_name', 'Unknown')
             dist = get_val(d, 'distance_km', 0.0)
             gain = get_val(d, 'elevation_gain_m', 0)
