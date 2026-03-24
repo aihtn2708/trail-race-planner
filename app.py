@@ -146,22 +146,36 @@ if not st.session_state.logged_in:
                     
                     if total > 0:
                         temp_pwd = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
-                        doc_id = get_val(docs[0], '$id', get_val(docs[0], 'id', ''))
                         
-                        databases.update_document(
-                            database_id=DB_ID, 
-                            collection_id=U_COL, 
-                            document_id=doc_id, 
-                            data={"password_hash": hash_password(temp_pwd)}
-                        )
-                        
-                        email_status = send_reset_email(clean_reset, temp_pwd)
-                        if email_status == "SUCCESS":
-                            st.success("A temporary password has been sent to your email.")
-                        elif email_status == "SIMULATED":
-                            st.warning(f"Email config missing. Your temp password is: **{temp_pwd}**")
+                        # 🚀 FIX 1: Foolproof Database ID Extraction
+                        user_doc = docs[0]
+                        if isinstance(user_doc, dict):
+                            doc_id = user_doc.get('$id', user_doc.get('id'))
                         else:
-                            st.error(f"Failed to send email: {email_status}")
+                            doc_id = getattr(user_doc, 'id', getattr(user_doc, '$id', None))
+                        
+                        try:
+                            # Save it to the database
+                            databases.update_document(
+                                database_id=DB_ID, 
+                                collection_id=U_COL, 
+                                document_id=doc_id, 
+                                data={"password_hash": hash_password(temp_pwd)}
+                            )
+                            
+                            email_status = send_reset_email(clean_reset, temp_pwd)
+                            
+                            if email_status == "SUCCESS":
+                                st.success("A temporary password has been sent to your email.")
+                            elif email_status == "SIMULATED":
+                                st.warning("Email server not configured. Your temp password is below:")
+                                # 🚀 FIX 2: One-click copy box prevents copying spaces or asterisks!
+                                st.code(temp_pwd) 
+                            else:
+                                st.error(f"Failed to send email: {email_status}")
+                                
+                        except Exception as e:
+                            st.error(f"Failed to update password in database: {e}")
                     else:
                         st.error("Email not found in our database.")
                     
