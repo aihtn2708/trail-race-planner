@@ -1,5 +1,5 @@
 import warnings
-# Silence Appwrite Deprecation Warnings for a clean log
+# Silence Appwrite's future Deprecation Warnings so the terminal stays clean
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import streamlit as st
@@ -38,22 +38,15 @@ try:
     databases = Databases(client)
     
     DB_ID = st.secrets["APPWRITE_DATABASE_ID"]
-    U_COL = st.secrets["APPWRITE_USERS_COLLECTION"] # Now treated as Table ID
-    R_COL = st.secrets["APPWRITE_RACES_COLLECTION"] # Now treated as Table ID
+    U_COL = st.secrets["APPWRITE_USERS_COLLECTION"]
+    R_COL = st.secrets["APPWRITE_RACES_COLLECTION"]
 except Exception as e:
     st.error(f"🚨 Appwrite Connection Error: {e}. Check your secrets!")
     st.stop()
 
-# --- Super-Safe Data Extractor (Updated for Rows/Documents) ---
+# --- Super-Safe Data Extractor ---
 def get_val(obj, key, default=None):
     if obj is None: return default
-    # Relational API returns 'rows', older SDKs return 'documents'
-    if key == 'documents':
-        try: return obj['rows']
-        except: 
-            try: return obj['documents']
-            except: pass
-    
     try: return obj[key]
     except: pass
     try: return getattr(obj, key)
@@ -65,11 +58,10 @@ def get_val(obj, key, default=None):
         except: pass
     return default
 
-# --- Database Query Helper (Migrated to list_rows) ---
+# --- Database Query Helper ---
 def query_user_by_email(email):
     try:
-        # Migration: list_documents -> list_rows | collection_id -> table_id
-        return databases.list_rows(database_id=DB_ID, table_id=U_COL, queries=[Query.equal("email", email)])
+        return databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", email)])
     except Exception as e:
         st.error(f"🚨 Appwrite Database Error: {e}")
         return None
@@ -154,8 +146,7 @@ if not st.session_state.logged_in:
                         temp_pwd = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
                         doc_id = get_val(get_val(res, 'documents', [])[0], '$id')
                         try:
-                            # Migration: update_document -> update_row
-                            databases.update_row(database_id=DB_ID, table_id=U_COL, row_id=doc_id, data={"password_hash": hash_password(temp_pwd)})
+                            databases.update_document(database_id=DB_ID, collection_id=U_COL, document_id=doc_id, data={"password_hash": hash_password(temp_pwd)})
                             email_status = send_reset_email(clean_reset, temp_pwd)
                             if email_status == "SUCCESS": st.success("✅ A temporary password has been sent.")
                             else: st.warning("Simulated password:"); st.code(temp_pwd) 
@@ -171,8 +162,7 @@ if not st.session_state.logged_in:
                     res = query_user_by_email(clean_new)
                     if res is not None and get_val(res, 'total', 0) == 0:
                         try:
-                            # Migration: create_document -> create_row
-                            databases.create_row(database_id=DB_ID, table_id=U_COL, row_id=ID.unique(), data={"email": clean_new, "password_hash": hash_password(rpw)})
+                            databases.create_document(database_id=DB_ID, collection_id=U_COL, document_id=ID.unique(), data={"email": clean_new, "password_hash": hash_password(rpw)})
                             st.success("✅ Account created! Please switch to the Login tab.")
                         except Exception as e: st.error(f"🚨 Creation Error: {e}")
                     elif res is not None: st.error("⚠️ Email already exists.")
@@ -231,14 +221,16 @@ with active_tab:
         t_dist, t_gain = rdf['dist'].max()/1000, display_df['gain'].sum()
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("Distance", f"{t_dist:.2f} km"); c2.metric("Total Gain", f"{t_gain} m"); c3.metric("Est. Finish", display_df['ETA'].iloc[-1])
+        c1.metric("Distance", f"{t_dist:.2f} km")
+        c2.metric("Total Gain", f"{t_gain} m")
+        c3.metric("Est. Finish", display_df['ETA'].iloc[-1])
 
         st.plotly_chart(px.area(rdf, x='dist', y='ele', height=250), width="stretch")
 
         cfg = {
             "km": st.column_config.NumberColumn("KM", width="small", disabled=True),
-            "gain": st.column_config.NumberColumn("🔺", width="small", disabled=True, help="Elevation Gain (m)"),
-            "loss": st.column_config.NumberColumn("🔻", width="small", disabled=True, help="Elevation Loss (m)"),
+            "gain": st.column_config.NumberColumn("🔺", width="small", disabled=True, help="Gain (m)"),
+            "loss": st.column_config.NumberColumn("🔻", width="small", disabled=True, help="Loss (m)"),
             "Pace": st.column_config.TextColumn("Pace", width="small", help="Target Pace (mm:ss)"),
             "ETA": st.column_config.TextColumn("ETA", width="small", disabled=True, help="Estimated Time"),
             "💧": st.column_config.CheckboxColumn("💧", width="small", help="Water"),
@@ -272,8 +264,7 @@ with active_tab:
         if st.session_state.logged_in:
             rname = st.text_input("Race Name")
             if st.button("💾 Save to Cloud", width="stretch") and rname:
-                # Migration: create_document -> create_row
-                databases.create_row(database_id=DB_ID, table_id=R_COL, row_id=ID.unique(), data={
+                databases.create_document(database_id=DB_ID, collection_id=R_COL, document_id=ID.unique(), data={
                     "email": st.session_state.email, "race_name": rname,
                     "plan_json": final_df.to_json(orient='records'),
                     "distance_km": float(t_dist), "elevation_gain_m": int(t_gain), "finish_time": final_df['ETA'].iloc[-1]
@@ -283,8 +274,7 @@ with active_tab:
 if st.session_state.logged_in:
     with saved_tab:
         try:
-            # Migration: list_documents -> list_rows
-            res = databases.list_rows(database_id=DB_ID, table_id=R_COL, queries=[Query.equal("email", st.session_state.email), Query.order_desc("$createdAt")])
+            res = databases.list_documents(database_id=DB_ID, collection_id=R_COL, queries=[Query.equal("email", st.session_state.email), Query.order_desc("$createdAt")])
             docs = get_val(res, 'documents', [])
         except: docs = []
         for d in docs:
@@ -297,6 +287,34 @@ if st.session_state.logged_in:
                 c1, c2 = st.columns(2)
                 c1.download_button("📥 CSV", rdf.to_csv(index=False).encode('utf-8-sig'), f"{rid}.csv", key=f"dl_{rid}")
                 if c2.button("🗑️ Delete", key=f"del_{rid}", width="stretch"):
-                    # Migration: delete_document -> delete_row
-                    databases.delete_row(database_id=DB_ID, table_id=R_COL, row_id=rid)
+                    databases.delete_document(database_id=DB_ID, collection_id=R_COL, document_id=rid)
                     st.rerun()
+
+    with settings_tab:
+        st.subheader("🔐 Change Your Password")
+        with st.form("change_password_form"):
+            current_pwd = st.text_input("Current Password", type="password")
+            new_pwd = st.text_input("New Password", type="password")
+            confirm_pwd = st.text_input("Confirm New Password", type="password")
+            if st.form_submit_button("Update Password", width="stretch"):
+                res = query_user_by_email(st.session_state.email)
+                docs = get_val(res, 'documents', []) if res else []
+                if docs:
+                    user_doc = docs[0]
+                    stored_hash = get_val(user_doc, 'password_hash', '')
+                    doc_id = get_val(user_doc, '$id')
+                    if not verify_password(current_pwd, stored_hash): st.error("Current password incorrect.")
+                    elif new_pwd != confirm_pwd: st.error("New passwords do not match.")
+                    elif len(new_pwd) < 6: st.error("Must be at least 6 characters.")
+                    else:
+                        databases.update_document(database_id=DB_ID, collection_id=U_COL, document_id=doc_id, data={"password_hash": hash_password(new_pwd)})
+                        st.success("Password updated!")
+
+    if admin_tab:
+        with admin_tab:
+            try:
+                u_res = databases.list_documents(database_id=DB_ID, collection_id=U_COL)
+                r_res = databases.list_documents(database_id=DB_ID, collection_id=R_COL)
+                st.metric("Total Users", get_val(u_res, 'total', 0))
+                st.metric("Total Plans", get_val(r_res, 'total', 0))
+            except Exception as e: st.error(f"Admin Metrics Error: {e}")
