@@ -191,7 +191,8 @@ with active_tab:
         edit_df['sec'] = edit_df['Pace'].apply(pace_to_seconds)
         edit_df['ETA'] = edit_df['sec'].cumsum().apply(seconds_to_eta)
         eta_placeholder.metric("Estimated Finish", edit_df['ETA'].iloc[-1])
-
+        edit_df = edit_df.drop(columns=['sec'])
+    
         # Display final table
         st.dataframe(edit_df, hide_index=True, width="stretch", column_config=cfg)
         
