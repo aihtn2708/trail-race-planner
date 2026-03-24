@@ -37,7 +37,7 @@ try:
     U_COL = st.secrets["APPWRITE_USERS_COLLECTION"]
     R_COL = st.secrets["APPWRITE_RACES_COLLECTION"]
 except Exception as e:
-    st.error(f"Appwrite Connection Error: {e}")
+    st.error(f"Appwrite Connection Error: {e}. Check your secrets!")
     st.stop()
 
 # --- Security & Time Helpers ---
@@ -132,7 +132,7 @@ with active_tab:
         if 'p_df' not in st.session_state or st.session_state.get('f_name') != up.name:
             p_df, r_df = process_gpx(up.getvalue())
             
-            # Initialize all checklist columns
+            # Setup initial state
             p_df['Pace'] = "06:00"
             p_df['💧'] = False
             p_df['🍯'] = False
@@ -141,18 +141,26 @@ with active_tab:
             p_df['Notes'] = ""
             st.session_state.p_df, st.session_state.r_df, st.session_state.f_name = p_df, r_df, up.name
         
-        pdf, rdf = st.session_state.p_df, st.session_state.r_df
-        t_dist = rdf['dist'].max() / 1000
-        t_gain = pdf['gain'].sum()
+        # 1. Grab base data and dynamically calculate ETA FIRST
+        base_df = st.session_state.p_df.copy()
+        base_df['sec'] = base_df['Pace'].apply(pace_to_seconds)
+        base_df['ETA'] = base_df['sec'].cumsum().apply(seconds_to_eta)
+        display_df = base_df.drop(columns=['sec']) # Hide math column
         
+        rdf = st.session_state.r_df
+        t_dist = rdf['dist'].max() / 1000
+        t_gain = display_df['gain'].sum()
+        total_time = display_df['ETA'].iloc[-1]
+        
+        # 2. Render Header Metrics
         col1, col2, col3 = st.columns(3)
         col1.metric("Distance", f"{t_dist:.2f} km")
         col2.metric("Total Gain", f"{t_gain} m")
-        eta_placeholder = col3.empty()
+        col3.metric("Estimated Finish", total_time)
 
         st.plotly_chart(px.area(rdf, x='dist', y='ele', height=250), width="stretch")
 
-        # --- 🚀 NEW: Tooltips added and sizing enforced to prevent wrapping ---
+        # 3. Strict Column Config (with tooltips added via 'help')
         cfg = {
             "km": st.column_config.NumberColumn("KM", width="small", disabled=True),
             "gain": st.column_config.NumberColumn("🔺", width="small", disabled=True, help="Elevation Gain (m)"),
@@ -166,38 +174,42 @@ with active_tab:
             "Notes": st.column_config.TextColumn("Notes", width="medium", help="Optional strategy notes")
         }
 
+        # 4. Render ONE Unified Table
         if is_mobile:
-            st.info("Swipe left/right on the table below to view all columns.")
+            st.info("📱 **Mobile View:** Swipe left/right on the table below to view all columns.")
             with st.form("mobile_edit"):
                 f_km, t_km = st.columns(2)
-                f_v = f_km.number_input("From KM", 1, int(pdf['km'].max()), 1)
-                t_v = t_km.number_input("To KM", 1, int(pdf['km'].max()), int(pdf['km'].max()))
+                f_v = f_km.number_input("From KM", 1, int(display_df['km'].max()), 1)
+                t_v = t_km.number_input("To KM", 1, int(display_df['km'].max()), int(display_df['km'].max()))
                 p_v = st.text_input("New Pace (mm:ss)", "06:00")
                 nutri = st.multiselect("Nutrition", ["💧", "🍯", "🍌", "🧂"], help="Select what to consume in this section")
                 
                 if st.form_submit_button("Apply Changes", width="stretch"):
-                    mask = (pdf['km'] >= f_v) & (pdf['km'] <= t_v)
-                    pdf.loc[mask, 'Pace'] = p_v
+                    # Update state and refresh
+                    mask = (st.session_state.p_df['km'] >= f_v) & (st.session_state.p_df['km'] <= t_v)
+                    st.session_state.p_df.loc[mask, 'Pace'] = p_v
                     for icon in ["💧", "🍯", "🍌", "🧂"]:
-                        pdf.loc[mask, icon] = (icon in nutri)
-                    st.session_state.p_df = pdf
+                        st.session_state.p_df.loc[mask, icon] = (icon in nutri)
                     st.rerun()
-            edit_df = pdf
+            
+            # Static view for mobile swiping
+            st.dataframe(display_df, hide_index=True, width="stretch", column_config=cfg)
+            final_display_df = display_df
         else:
-            edit_df = st.data_editor(pdf, hide_index=True, width="stretch", column_config=cfg)
-            st.session_state.p_df = edit_df
-
-        # ETA Calculations
-        edit_df['sec'] = edit_df['Pace'].apply(pace_to_seconds)
-        edit_df['ETA'] = edit_df['sec'].cumsum().apply(seconds_to_eta)
-        eta_placeholder.metric("Estimated Finish", edit_df['ETA'].iloc[-1])
-        edit_df = edit_df.drop(columns=['sec'])
-    
-        # Display final table
-        st.dataframe(edit_df, hide_index=True, width="stretch", column_config=cfg)
+            st.info("💻 **Desktop View:** Click directly into the table cells below to edit your pace and nutrition.")
+            
+            # Single interactive editor including the locked ETA column
+            edit_df = st.data_editor(display_df, hide_index=True, width="stretch", column_config=cfg)
+            
+            # If edits occur, save back to base state (minus the ETA column) and instantly recalculate
+            if not edit_df.equals(display_df):
+                st.session_state.p_df = edit_df.drop(columns=['ETA'])
+                st.rerun()
+                
+            final_display_df = edit_df
         
-        # Export & Save
-        st.download_button("📥 Download Plan (CSV)", edit_df.to_csv(index=False).encode('utf-8-sig'), "race_plan.csv", "text/csv", width="stretch")
+        # 5. Export & Save 
+        st.download_button("📥 Download Plan (CSV)", final_display_df.to_csv(index=False).encode('utf-8-sig'), "race_plan.csv", "text/csv", width="stretch")
         
         if st.session_state.logged_in:
             r_name = st.text_input("Race Name to Save")
@@ -205,10 +217,10 @@ with active_tab:
                 databases.create_document(DB_ID, R_COL, ID.unique(), {
                     "email": st.session_state.email,
                     "race_name": r_name,
-                    "plan_json": edit_df.to_json(orient='records'),
+                    "plan_json": final_display_df.to_json(orient='records'),
                     "distance_km": float(t_dist),
                     "elevation_gain_m": int(t_gain),
-                    "finish_time": edit_df['ETA'].iloc[-1]
+                    "finish_time": total_time
                 })
                 st.success("Race Saved Successfully!")
 
@@ -220,7 +232,12 @@ if st.session_state.logged_in:
             with st.expander(f"🏁 {d['race_name']} ({d['distance_km']:.1f}km)"):
                 st.caption(f"Gain: {d['elevation_gain_m']}m | Time: {d['finish_time']}")
                 rdf = pd.read_json(io.StringIO(d['plan_json']))
+                
+                # Cleanup older plans that might have saved the 'sec' column
+                if 'sec' in rdf.columns: rdf = rdf.drop(columns=['sec'])
+                
                 st.dataframe(rdf, hide_index=True, width="stretch", column_config=cfg)
+                
                 c_dl, c_del = st.columns(2)
                 c_dl.download_button("📥 Download CSV", rdf.to_csv(index=False).encode('utf-8-sig'), f"{d['race_name']}.csv", key=f"dl_{d['$id']}")
                 if c_del.button("🗑️ Delete Race", key=f"del_{d['$id']}", width="stretch"):
