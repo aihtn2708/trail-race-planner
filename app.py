@@ -152,27 +152,28 @@ with active_tab:
 
         st.plotly_chart(px.area(rdf, x='dist', y='ele', height=250), width="stretch")
 
-        # --- Strict Column Configuration to prevent text wrapping ---
+        # --- 🚀 NEW: Tooltips added and sizing enforced to prevent wrapping ---
         cfg = {
             "km": st.column_config.NumberColumn("KM", width="small", disabled=True),
-            "gain": st.column_config.NumberColumn("🔺", width="small", disabled=True),
-            "loss": st.column_config.NumberColumn("🔻", width="small", disabled=True),
-            "Pace": st.column_config.TextColumn("Pace", width="small"),
-            "ETA": st.column_config.TextColumn("ETA", width="small", disabled=True),
-            "💧": st.column_config.CheckboxColumn("💧", width="small"),
-            "🍯": st.column_config.CheckboxColumn("🍯", width="small"),
-            "🍌": st.column_config.CheckboxColumn("🍌", width="small"),
-            "🧂": st.column_config.CheckboxColumn("🧂", width="small"),
-            "Notes": st.column_config.TextColumn("Notes", width="medium")
+            "gain": st.column_config.NumberColumn("🔺", width="small", disabled=True, help="Elevation Gain (m)"),
+            "loss": st.column_config.NumberColumn("🔻", width="small", disabled=True, help="Elevation Loss (m)"),
+            "Pace": st.column_config.TextColumn("Pace", width="small", help="Target Pace (mm:ss)"),
+            "ETA": st.column_config.TextColumn("ETA", width="small", disabled=True, help="Estimated Time of Arrival"),
+            "💧": st.column_config.CheckboxColumn("💧", width="small", help="Water"),
+            "🍯": st.column_config.CheckboxColumn("🍯", width="small", help="Energy Gel"),
+            "🍌": st.column_config.CheckboxColumn("🍌", width="small", help="Real Food / Solid Nutrition"),
+            "🧂": st.column_config.CheckboxColumn("🧂", width="small", help="Salt / Electrolyte Pills"),
+            "Notes": st.column_config.TextColumn("Notes", width="medium", help="Optional strategy notes")
         }
 
         if is_mobile:
+            st.info("Swipe left/right on the table below to view all columns.")
             with st.form("mobile_edit"):
                 f_km, t_km = st.columns(2)
                 f_v = f_km.number_input("From KM", 1, int(pdf['km'].max()), 1)
                 t_v = t_km.number_input("To KM", 1, int(pdf['km'].max()), int(pdf['km'].max()))
                 p_v = st.text_input("New Pace (mm:ss)", "06:00")
-                nutri = st.multiselect("Nutrition", ["💧", "🍯", "🍌", "🧂"])
+                nutri = st.multiselect("Nutrition", ["💧", "🍯", "🍌", "🧂"], help="Select what to consume in this section")
                 
                 if st.form_submit_button("Apply Changes", width="stretch"):
                     mask = (pdf['km'] >= f_v) & (pdf['km'] <= t_v)
