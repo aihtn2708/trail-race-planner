@@ -40,7 +40,7 @@ except Exception as e:
     st.error(f"Appwrite Connection Error: {e}. Check your secrets!")
     st.stop()
 
-# --- Safe Data Extractor ---
+# --- Safe Data Extractor (Fixes Appwrite SDK version differences) ---
 def get_val(obj, key, default=None):
     if isinstance(obj, dict):
         return obj.get(key, default)
@@ -50,7 +50,7 @@ def get_val(obj, key, default=None):
 def hash_password(password): 
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
-# 🚀 FIX: Bulletproof password verification that catches empty or bad hashes
+# Bulletproof password verification that catches empty or bad hashes
 def verify_password(password, hashed_str):
     if not hashed_str or not isinstance(hashed_str, str):
         return False
@@ -76,7 +76,7 @@ def send_reset_email(to_email, temp_password):
     if not sender or not pwd: return "SIMULATED"
     
     msg = EmailMessage()
-    msg.set_content(f"Your temporary password is: {temp_password}")
+    msg.set_content(f"Your temporary password is: {temp_password}\n\nPlease log in and update your password immediately.")
     msg['Subject'] = 'Password Reset - Trail Race Planner'
     msg['From'], msg['To'] = sender, to_email
     try:
@@ -111,12 +111,40 @@ if not st.session_state.logged_in:
                 total = get_val(res, 'total', 0)
                 docs = get_val(res, 'documents', [])
                 
-                # It will safely fail here if the hash is missing
                 if total > 0 and verify_password(pw, get_val(docs[0], 'password_hash', '')):
                     st.session_state.logged_in, st.session_state.email = True, em
                     st.rerun()
                 else: 
                     st.error("Invalid email or password.")
+            
+            # --- Forgot Password Feature ---
+            with st.expander("Forgot Password?"):
+                reset_em = st.text_input("Enter your account email", key="reset_em")
+                if st.button("Send Temp Password", width="stretch"):
+                    res = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", reset_em)])
+                    total = get_val(res, 'total', 0)
+                    docs = get_val(res, 'documents', [])
+                    
+                    if total > 0:
+                        temp_pwd = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
+                        doc_id = get_val(docs[0], '$id', get_val(docs[0], 'id', ''))
+                        
+                        databases.update_document(
+                            database_id=DB_ID, 
+                            collection_id=U_COL, 
+                            document_id=doc_id, 
+                            data={"password_hash": hash_password(temp_pwd)}
+                        )
+                        
+                        email_status = send_reset_email(reset_em, temp_pwd)
+                        if email_status == "SUCCESS":
+                            st.success("A temporary password has been sent to your email.")
+                        elif email_status == "SIMULATED":
+                            st.warning(f"Email config missing. Your temp password is: **{temp_pwd}**")
+                        else:
+                            st.error(f"Failed to send email: {email_status}")
+                    else:
+                        st.error("Email not found in our database.")
                     
         with t[1]:
             rem = st.text_input("New Email", key="r_em")
@@ -155,7 +183,7 @@ def process_gpx(file_bytes):
 
 # --- Main UI ---
 st.title("🏔️ Trail Race Planner")
-ADMIN_EMAIL = "aihtn2708@gmail.com"
+ADMIN_EMAIL = "aihtn2708@gmail.com" # Change this if needed to trigger the admin tab
 
 if st.session_state.logged_in:
     t_names = ["Plan New Race", "My Saved Races", "Account Settings"]
