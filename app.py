@@ -63,7 +63,7 @@ def query_user_by_email(email):
     try:
         return databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", email)])
     except Exception as e:
-        st.error(f"🚨 Appwrite Database Error: {e} \n\n**(Check Appwrite Permissions and Indexes!)**")
+        st.error(f"🚨 Appwrite Database Error: {e}")
         return None
 
 # --- Security & Time Helpers ---
@@ -135,14 +135,20 @@ if not st.session_state.logged_in:
                     
                     if total > 0:
                         stored_hash = get_val(docs[0], 'password_hash', '')
-                        if not stored_hash:
-                            st.error("🚨 Database Error: Your password hash is missing in Appwrite.")
-                        elif verify_password(pw, stored_hash):
+                        
+                        if verify_password(pw, stored_hash):
                             st.session_state.logged_in = True
                             st.session_state.email = clean_email
                             st.rerun()
                         else: 
                             st.error("❌ Incorrect password.")
+                            # 🚀 NEW: Debug Inspector to see what is failing
+                            with st.expander("🕵️ Debug Inspector (Click to open)"):
+                                st.write("**Appwrite Data Retrieved:**")
+                                st.json(docs[0].__dict__ if hasattr(docs[0], '__dict__') else docs[0])
+                                st.write(f"**Hash Length:** {len(str(stored_hash))} characters")
+                                if len(str(stored_hash)) < 60:
+                                    st.error("WARNING: Your hash is less than 60 characters! Appwrite is chopping it off. Change the 'password_hash' attribute size to 255 in the Appwrite Console.")
                     else: 
                         st.error("❌ Email not found. Try signing up first.")
             
@@ -194,7 +200,7 @@ if not st.session_state.logged_in:
                     elif res is not None: 
                         st.error("⚠️ An account with this email already exists.")
                 else:
-                    st.error("Invalid email or password is less than 6 characters.")
+                    st.error("Invalid email, or password is less than 6 characters.")
 else:
     st.sidebar.success(f"User: {st.session_state.email}")
     if st.sidebar.button("Log Out", width="stretch"):
@@ -337,7 +343,11 @@ if st.session_state.logged_in:
             gain = get_val(d, 'elevation_gain_m', 0)
             ftime = get_val(d, 'finish_time', 'N/A')
             p_json = get_val(d, 'plan_json', '[]')
-            doc_id = get_val(d, '$id', get_val(d, 'id', ''))
+            
+            if isinstance(d, dict):
+                doc_id = d.get('$id', d.get('id', ''))
+            else:
+                doc_id = getattr(d, 'id', getattr(d, '$id', ''))
             
             with st.expander(f"🏁 {r_name} ({dist:.1f}km)"):
                 st.caption(f"Gain: {gain}m | Time: {ftime}")
@@ -362,8 +372,13 @@ if st.session_state.logged_in:
                 res = query_user_by_email(st.session_state.email)
                 docs = get_val(res, 'documents', []) if res else []
                 if docs:
-                    stored_hash = get_val(docs[0], 'password_hash', '')
-                    doc_id = get_val(docs[0], '$id', get_val(docs[0], 'id', ''))
+                    user_doc = docs[0]
+                    stored_hash = get_val(user_doc, 'password_hash', '')
+                    
+                    if isinstance(user_doc, dict):
+                        doc_id = user_doc.get('$id', user_doc.get('id', ''))
+                    else:
+                        doc_id = getattr(user_doc, 'id', getattr(user_doc, '$id', ''))
                         
                     if not verify_password(current_pwd, stored_hash): st.error("Current password incorrect.")
                     elif new_pwd != confirm_pwd: st.error("New passwords do not match.")
