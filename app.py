@@ -110,30 +110,29 @@ if not st.session_state.logged_in:
             pw = st.text_input("Password", type="password", key="l_pw")
             
             if st.button("Submit Login", width="stretch"):
-                # 🚀 FIX: Force lowercase and strip hidden spaces
-                clean_email = em.strip().lower() 
+                # 🚀 FIX 1: Strip hidden spaces and force lowercase on the email
+                clean_email = em.strip().lower()
+                clean_pw = pw.strip() # Strip invisible spaces from pasted passwords!
                 
                 res = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", clean_email)])
                 total = get_val(res, 'total', 0)
                 docs = get_val(res, 'documents', [])
                 
-                if total == 0:
-                    st.error(f"Could not find an account for: {clean_email}")
-                else:
-                    # Try a few different ways to pull the hash depending on Appwrite's format
-                    user_doc = docs[0]
-                    stored_hash = get_val(user_doc, 'password_hash')
-                    if not stored_hash and hasattr(user_doc, '__dict__'):
-                        stored_hash = user_doc.__dict__.get('password_hash')
+                if total > 0:
+                    stored_hash = get_val(docs[0], 'password_hash', '')
                     
-                    if verify_password(pw, stored_hash):
+                    # 🚀 FIX 2: Diagnostic check for chopped-off hashes!
+                    if len(stored_hash) > 0 and len(stored_hash) < 60:
+                        st.error("🚨 DATABASE ERROR: Your 'password_hash' in Appwrite is getting chopped off! A hash must be 60 characters, but yours is shorter. Go to Appwrite > Users Collection > Attributes, DELETE the 'password_hash' attribute, and recreate it with a Size of 255.")
+                    
+                    elif verify_password(clean_pw, stored_hash):
                         st.session_state.logged_in = True
                         st.session_state.email = clean_email
                         st.rerun()
                     else: 
-                        st.error("Email found, but password was incorrect.")
-                        # DEBUG: Show us what the hash looks like so we can fix it!
-                        st.info(f"Debug Info: Hash length is {len(str(stored_hash))} characters.")
+                        st.error("Invalid email or password.")
+                else: 
+                    st.error("Invalid email or password.")
             
             # --- Forgot Password Feature ---
             with st.expander("Forgot Password?"):
