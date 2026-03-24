@@ -1,3 +1,7 @@
+import warnings
+# Silence Appwrite Deprecation Warnings so logs stay clean
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 import streamlit as st
 import gpxpy
 import pandas as pd
@@ -37,27 +41,39 @@ try:
     U_COL = st.secrets["APPWRITE_USERS_COLLECTION"]
     R_COL = st.secrets["APPWRITE_RACES_COLLECTION"]
 except Exception as e:
-    st.error(f"Appwrite Connection Error: {e}. Check your secrets!")
+    st.error(f"🚨 Appwrite Connection Error: {e}. Check your secrets!")
     st.stop()
 
-# --- Safe Data Extractor (Fixes Appwrite SDK version differences) ---
+# --- Super-Safe Data Extractor ---
 def get_val(obj, key, default=None):
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
+    if obj is None: return default
+    try: return obj[key]
+    except: pass
+    try: return getattr(obj, key)
+    except: pass
+    if key.startswith('$'):
+        try: return getattr(obj, key[1:])
+        except: pass
+        try: return obj[key[1:]]
+        except: pass
+    return default
+
+# --- Database Query Helper with Error Catching ---
+def query_user_by_email(email):
+    try:
+        return databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", email)])
+    except Exception as e:
+        st.error(f"🚨 Appwrite Database Error: {e} \n\n**(Check Appwrite Permissions and Indexes!)**")
+        return None
 
 # --- Security & Time Helpers ---
 def hash_password(password): 
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
-# Bulletproof password verification that catches empty or bad hashes
 def verify_password(password, hashed_str):
-    if not hashed_str or not isinstance(hashed_str, str):
-        return False
-    try:
-        return bcrypt.checkpw(password.encode('utf-8'), hashed_str.encode('utf-8'))
-    except ValueError:
-        return False
+    if not hashed_str or not isinstance(hashed_str, str): return False
+    try: return bcrypt.checkpw(password.encode('utf-8'), hashed_str.encode('utf-8'))
+    except ValueError: return False
 
 def pace_to_seconds(p):
     try:
@@ -104,95 +120,86 @@ if not st.session_state.logged_in:
     if not st.session_state.guest_mode:
         t = st.sidebar.tabs(["Login", "Sign Up"])
         
-        # --- LOGIN TAB ---
+        # --- LOGIN ---
         with t[0]:
             em = st.text_input("Email", key="l_em")
             pw = st.text_input("Password", type="password", key="l_pw")
             
             if st.button("Submit Login", width="stretch"):
-                # 🚀 FIX 1: Strip hidden spaces and force lowercase on the email
                 clean_email = em.strip().lower()
-                clean_pw = pw.strip() # Strip invisible spaces from pasted passwords!
+                res = query_user_by_email(clean_email)
                 
-                res = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", clean_email)])
-                total = get_val(res, 'total', 0)
-                docs = get_val(res, 'documents', [])
-                
-                if total > 0:
-                    stored_hash = get_val(docs[0], 'password_hash', '')
-                    
-                    # 🚀 FIX 2: Diagnostic check for chopped-off hashes!
-                    if len(stored_hash) > 0 and len(stored_hash) < 60:
-                        st.error("🚨 DATABASE ERROR: Your 'password_hash' in Appwrite is getting chopped off! A hash must be 60 characters, but yours is shorter. Go to Appwrite > Users Collection > Attributes, DELETE the 'password_hash' attribute, and recreate it with a Size of 255.")
-                    
-                    elif verify_password(clean_pw, stored_hash):
-                        st.session_state.logged_in = True
-                        st.session_state.email = clean_email
-                        st.rerun()
-                    else: 
-                        st.error("Invalid email or password.")
-                else: 
-                    st.error("Invalid email or password.")
-            
-            # --- Forgot Password Feature ---
-            with st.expander("Forgot Password?"):
-                reset_em = st.text_input("Enter your account email", key="reset_em")
-                if st.button("Send Temp Password", width="stretch"):
-                    clean_reset = reset_em.strip().lower()
-                    res = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", clean_reset)])
+                if res:
                     total = get_val(res, 'total', 0)
                     docs = get_val(res, 'documents', [])
                     
                     if total > 0:
+                        stored_hash = get_val(docs[0], 'password_hash', '')
+                        if not stored_hash:
+                            st.error("🚨 Database Error: Your password hash is missing in Appwrite.")
+                        elif verify_password(pw, stored_hash):
+                            st.session_state.logged_in = True
+                            st.session_state.email = clean_email
+                            st.rerun()
+                        else: 
+                            st.error("❌ Incorrect password.")
+                    else: 
+                        st.error("❌ Email not found. Try signing up first.")
+            
+            # --- FORGOT PASSWORD ---
+            with st.expander("Forgot Password?"):
+                reset_em = st.text_input("Enter your account email", key="reset_em")
+                if st.button("Send Temp Password", width="stretch"):
+                    clean_reset = reset_em.strip().lower()
+                    res = query_user_by_email(clean_reset)
+                    
+                    if res and get_val(res, 'total', 0) > 0:
                         temp_pwd = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
-                        
-                        # 🚀 FIX 1: Foolproof Database ID Extraction
-                        user_doc = docs[0]
-                        if isinstance(user_doc, dict):
-                            doc_id = user_doc.get('$id', user_doc.get('id'))
-                        else:
-                            doc_id = getattr(user_doc, 'id', getattr(user_doc, '$id', None))
+                        doc_id = get_val(get_val(res, 'documents', [])[0], '$id', get_val(get_val(res, 'documents', [])[0], 'id'))
                         
                         try:
-                            # Save it to the database
                             databases.update_document(
-                                database_id=DB_ID, 
-                                collection_id=U_COL, 
-                                document_id=doc_id, 
+                                database_id=DB_ID, collection_id=U_COL, document_id=doc_id, 
                                 data={"password_hash": hash_password(temp_pwd)}
                             )
-                            
                             email_status = send_reset_email(clean_reset, temp_pwd)
-                            
                             if email_status == "SUCCESS":
-                                st.success("A temporary password has been sent to your email.")
-                            elif email_status == "SIMULATED":
-                                st.warning("Email server not configured. Your temp password is below:")
-                                # 🚀 FIX 2: One-click copy box prevents copying spaces or asterisks!
-                                st.code(temp_pwd) 
+                                st.success("✅ A temporary password has been sent to your email.")
                             else:
-                                st.error(f"Failed to send email: {email_status}")
-                                
+                                st.warning("⚠️ Email server not configured. Your temp password is:")
+                                st.code(temp_pwd) 
                         except Exception as e:
-                            st.error(f"Failed to update password in database: {e}")
+                            st.error(f"🚨 Failed to update password: {e}")
                     else:
-                        st.error("Email not found in our database.")
+                        st.error("❌ Email not found in our database.")
                     
-        # --- SIGN UP TAB ---
+        # --- SIGN UP ---
         with t[1]:
             rem = st.text_input("New Email", key="r_em")
             rpw = st.text_input("New Password", type="password", key="r_pw")
             
             if st.button("Create Account", width="stretch"):
-                # 🚀 FIX: Force lowercase and strip hidden spaces
                 clean_new_email = rem.strip().lower()
-                
-                if len(rpw) >= 6:
-                    exists = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", clean_new_email)])
-                    if get_val(exists, 'total', 0) == 0:
-                        databases.create_document(database_id=DB_ID, collection_id=U_COL, document_id=ID.unique(), data={"email": clean_new_email, "password_hash": hash_password(rpw)})
-                        st.success("Account created! Please switch to the Login tab.")
-                    else: st.error("An account with this email already exists.")
+                if len(rpw) >= 6 and "@" in clean_new_email:
+                    res = query_user_by_email(clean_new_email)
+                    if res is not None and get_val(res, 'total', 0) == 0:
+                        try:
+                            databases.create_document(
+                                database_id=DB_ID, collection_id=U_COL, document_id=ID.unique(), 
+                                data={"email": clean_new_email, "password_hash": hash_password(rpw)}
+                            )
+                            st.success("✅ Account created! Please switch to the Login tab.")
+                        except Exception as e:
+                            st.error(f"🚨 Failed to create account. Check Appwrite Permissions! {e}")
+                    elif res is not None: 
+                        st.error("⚠️ An account with this email already exists.")
+                else:
+                    st.error("Invalid email or password is less than 6 characters.")
+else:
+    st.sidebar.success(f"User: {st.session_state.email}")
+    if st.sidebar.button("Log Out", width="stretch"):
+        st.session_state.logged_in = False
+        st.rerun()
 
 # --- GPX Processing ---
 @st.cache_data
@@ -215,7 +222,7 @@ def process_gpx(file_bytes):
 
 # --- Main UI ---
 st.title("🏔️ Trail Race Planner")
-ADMIN_EMAIL = "aihtn2708@gmail.com" # Change this if needed to trigger the admin tab
+ADMIN_EMAIL = "aihtn2708@gmail.com" 
 
 if st.session_state.logged_in:
     t_names = ["Plan New Race", "My Saved Races", "Account Settings"]
@@ -300,27 +307,30 @@ with active_tab:
         if st.session_state.logged_in:
             r_name = st.text_input("Race Name to Save")
             if st.button("💾 Save to Cloud", width="stretch") and r_name:
-                databases.create_document(
-                    database_id=DB_ID, 
-                    collection_id=R_COL, 
-                    document_id=ID.unique(), 
-                    data={
-                        "email": st.session_state.email,
-                        "race_name": r_name,
-                        "plan_json": final_display_df.to_json(orient='records'),
-                        "distance_km": float(t_dist),
-                        "elevation_gain_m": int(t_gain),
-                        "finish_time": total_time
-                    }
-                )
-                st.success("Race Saved Successfully!")
+                try:
+                    databases.create_document(
+                        database_id=DB_ID, collection_id=R_COL, document_id=ID.unique(), 
+                        data={
+                            "email": st.session_state.email, "race_name": r_name,
+                            "plan_json": final_display_df.to_json(orient='records'),
+                            "distance_km": float(t_dist), "elevation_gain_m": int(t_gain),
+                            "finish_time": total_time
+                        }
+                    )
+                    st.success("Race Saved Successfully!")
+                except Exception as e:
+                    st.error(f"🚨 Save Error: {e}")
 
 # --- Saved Races Tab ---
 if st.session_state.logged_in:
     with saved_tab:
-        res = databases.list_documents(database_id=DB_ID, collection_id=R_COL, queries=[Query.equal("email", st.session_state.email), Query.order_desc("$createdAt")])
-        docs = get_val(res, 'documents', [])
-        
+        try:
+            res = databases.list_documents(database_id=DB_ID, collection_id=R_COL, queries=[Query.equal("email", st.session_state.email), Query.order_desc("$createdAt")])
+            docs = get_val(res, 'documents', [])
+        except:
+            docs = []
+            st.error("🚨 Failed to load saved races. Check Appwrite Indexes!")
+            
         for d in docs:
             r_name = get_val(d, 'race_name', 'Unknown')
             dist = get_val(d, 'distance_km', 0.0)
@@ -332,7 +342,6 @@ if st.session_state.logged_in:
             with st.expander(f"🏁 {r_name} ({dist:.1f}km)"):
                 st.caption(f"Gain: {gain}m | Time: {ftime}")
                 rdf = pd.read_json(io.StringIO(p_json))
-                
                 if 'sec' in rdf.columns: rdf = rdf.drop(columns=['sec'])
                 
                 st.dataframe(rdf, hide_index=True, width="stretch", column_config=cfg)
@@ -350,11 +359,12 @@ if st.session_state.logged_in:
             new_pwd = st.text_input("New Password", type="password")
             confirm_pwd = st.text_input("Confirm New Password", type="password")
             if st.form_submit_button("Update Password", width="stretch"):
-                res = databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", st.session_state.email)])
-                docs = get_val(res, 'documents', [])
+                res = query_user_by_email(st.session_state.email)
+                docs = get_val(res, 'documents', []) if res else []
                 if docs:
                     stored_hash = get_val(docs[0], 'password_hash', '')
                     doc_id = get_val(docs[0], '$id', get_val(docs[0], 'id', ''))
+                        
                     if not verify_password(current_pwd, stored_hash): st.error("Current password incorrect.")
                     elif new_pwd != confirm_pwd: st.error("New passwords do not match.")
                     elif len(new_pwd) < 6: st.error("Must be at least 6 characters.")
@@ -362,10 +372,12 @@ if st.session_state.logged_in:
                         databases.update_document(database_id=DB_ID, collection_id=U_COL, document_id=doc_id, data={"password_hash": hash_password(new_pwd)})
                         st.success("Password updated!")
 
-    # --- Admin Dashboard ---
     if admin_tab:
         with admin_tab:
-            u_res = databases.list_documents(database_id=DB_ID, collection_id=U_COL)
-            r_res = databases.list_documents(database_id=DB_ID, collection_id=R_COL)
-            st.metric("Total Users", get_val(u_res, 'total', 0))
-            st.metric("Total Plans", get_val(r_res, 'total', 0))
+            try:
+                u_res = databases.list_documents(database_id=DB_ID, collection_id=U_COL)
+                r_res = databases.list_documents(database_id=DB_ID, collection_id=R_COL)
+                st.metric("Total Users", get_val(u_res, 'total', 0))
+                st.metric("Total Plans", get_val(r_res, 'total', 0))
+            except Exception as e:
+                st.error(f"Admin Metrics Error: {e}")
