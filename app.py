@@ -11,22 +11,21 @@ import string
 import io
 from appwrite.client import Client
 from appwrite.services.databases import Databases
-from appwrite.query import Query
 from appwrite.id import ID
+from appwrite.query import Query
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Trail Race Planner", layout="wide", initial_sidebar_state="collapsed")
 
-# --- Device Detection (Mobile vs Desktop) ---
+# --- Device Detection ---
 def check_if_mobile():
     try:
         user_agent = st.context.headers.get("user-agent", "").lower()
         return any(keyword in user_agent for keyword in ['mobile', 'android', 'iphone', 'ipad'])
-    except:
-        return False
+    except: return False
 is_mobile = check_if_mobile()
 
-# --- Initialize Appwrite Client ---
+# --- Initialize Appwrite ---
 try:
     client = Client()
     client.set_endpoint(st.secrets["APPWRITE_ENDPOINT"])
@@ -38,52 +37,29 @@ try:
     U_COL = st.secrets["APPWRITE_USERS_COLLECTION"]
     R_COL = st.secrets["APPWRITE_RACES_COLLECTION"]
 except Exception as e:
-    st.error(f"Configuration Error: {e}")
+    st.error(f"Appwrite Connection Error: {e}")
     st.stop()
 
-# --- Security & Email Helpers ---
-def hash_password(password):
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
-def verify_password(password, hashed_str):
-    return bcrypt.checkpw(password.encode('utf-8'), hashed_str.encode('utf-8'))
-
-def send_reset_email(to_email, temp_password):
-    sender = st.secrets.get("SENDER_EMAIL")
-    pwd = st.secrets.get("SENDER_APP_PASSWORD")
-    if not sender or not pwd: return "SIMULATED"
-    
-    msg = EmailMessage()
-    msg.set_content(f"Your temporary password is: {temp_password}")
-    msg['Subject'] = 'Password Reset - Trail Race Planner'
-    msg['From'], msg['To'] = sender, to_email
+# --- Security & Time Helpers ---
+def hash_password(password): return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+def verify_password(password, hashed): return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+def pace_to_seconds(p):
     try:
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-        server.login(sender, pwd)
-        server.send_message(msg)
-        server.quit()
-        return "SUCCESS"
-    except Exception as e: return str(e)
-
-# --- Time Math Helpers ---
-def pace_to_seconds(pace_str):
-    try:
-        m, s = map(int, str(pace_str).split(':'))
+        m, s = map(int, str(p).split(':'))
         return m * 60 + s
     except: return 360
-
-def seconds_to_eta(total_sec):
-    h, m = divmod(total_sec, 3600)
+def seconds_to_eta(s_total):
+    h, m = divmod(s_total, 3600)
     m, s = divmod(m, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
-# --- Authentication Logic ---
+# --- State Management ---
 if 'logged_in' not in st.session_state: st.session_state.logged_in = False
 if 'email' not in st.session_state: st.session_state.email = ""
 if 'guest_mode' not in st.session_state: st.session_state.guest_mode = False
 
+# --- Sidebar Auth ---
 st.sidebar.title("Account Access")
-
 if not st.session_state.logged_in:
     c1, c2 = st.sidebar.columns(2)
     with c1: 
@@ -92,54 +68,44 @@ if not st.session_state.logged_in:
         if st.button("🔒 Login", width="stretch"): st.session_state.guest_mode = False
 
     if not st.session_state.guest_mode:
-        auth_tabs = st.sidebar.tabs(["Login", "Sign Up"])
-        with auth_tabs[0]:
-            l_em = st.text_input("Email", key="l_em")
-            l_pw = st.text_input("Password", type="password", key="l_pw")
+        t = st.sidebar.tabs(["Login", "Sign Up"])
+        with t[0]:
+            em = st.text_input("Email", key="l_em")
+            pw = st.text_input("Password", type="password", key="l_pw")
             if st.button("Submit Login", width="stretch"):
-                res = databases.list_documents(DB_ID, U_COL, [Query.equal("email", l_em)])
-                if res['total'] > 0 and verify_password(l_pw, res['documents'][0]['password_hash']):
-                    st.session_state.logged_in, st.session_state.email = True, l_em
+                res = databases.list_documents(DB_ID, U_COL, [Query.equal("email", em)])
+                if res['total'] > 0 and verify_password(pw, res['documents'][0]['password_hash']):
+                    st.session_state.logged_in, st.session_state.email = True, em
                     st.rerun()
-                else: st.error("Invalid credentials.")
-            
-            with st.expander("Forgot Password?"):
-                r_em = st.text_input("Reset Email")
-                if st.button("Send Temp Password"):
-                    res = databases.list_documents(DB_ID, U_COL, [Query.equal("email", r_em)])
-                    if res['total'] > 0:
-                        temp = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
-                        databases.update_document(DB_ID, U_COL, res['documents'][0]['$id'], {"password_hash": hash_password(temp)})
-                        st.info(f"Status: {send_reset_email(r_em, temp)}")
-        
-        with auth_tabs[1]:
-            s_em = st.text_input("Email", key="s_em")
-            s_pw = st.text_input("Password", type="password", key="s_pw")
+                else: st.error("Invalid email or password.")
+        with t[1]:
+            rem = st.text_input("New Email", key="r_em")
+            rpw = st.text_input("New Password", type="password", key="r_pw")
             if st.button("Create Account", width="stretch"):
-                if len(s_pw) >= 6 and re.match(r'[^@]+@[^@]+\.[^@]+', s_em):
-                    exists = databases.list_documents(DB_ID, U_COL, [Query.equal("email", s_em)])
+                if len(rpw) >= 6:
+                    exists = databases.list_documents(DB_ID, U_COL, [Query.equal("email", rem)])
                     if exists['total'] == 0:
-                        databases.create_document(DB_ID, U_COL, ID.unique(), {"email": s_em, "password_hash": hash_password(s_pw)})
-                        st.success("Account created! Log in above.")
-                    else: st.error("Email already registered.")
+                        databases.create_document(DB_ID, U_COL, ID.unique(), {"email": rem, "password_hash": hash_password(rpw)})
+                        st.success("Account created! Please log in.")
+                    else: st.error("An account with this email already exists.")
 else:
     st.sidebar.success(f"User: {st.session_state.email}")
     if st.sidebar.button("Log Out", width="stretch"):
         st.session_state.logged_in = False
         st.rerun()
 
-# --- Core GPX Processing ---
+# --- GPX Processing ---
 @st.cache_data
 def process_gpx(file_bytes):
     gpx = gpxpy.parse(file_bytes)
     pts = []
-    d_cum = 0
+    d_acc = 0
     prev = None
-    for track in gpx.tracks:
-        for segment in track.segments:
-            for p in segment.points:
-                if prev: d_cum += p.distance_2d(prev)
-                pts.append({'dist': d_cum, 'ele': p.elevation})
+    for t in gpx.tracks:
+        for s in t.segments:
+            for p in s.points:
+                if prev: d_acc += p.distance_2d(prev)
+                pts.append({'dist': d_acc, 'ele': p.elevation})
                 prev = p
     df = pd.DataFrame(pts)
     df['km'] = (df['dist'] // 1000).astype(int) + 1
@@ -148,64 +114,92 @@ def process_gpx(file_bytes):
     return plan.round(0).astype(int), df
 
 # --- Main UI ---
-ADMIN_EMAIL = "aihtn2708@gmail.com"
 st.title("🏔️ Trail Race Planner")
+admin_mail = "aihtn2708@gmail.com"
 
 if st.session_state.logged_in:
-    t_list = ["Plan New Race", "My Saved Races", "Account Settings"]
-    if st.session_state.email == ADMIN_EMAIL: t_list.append("👑 Admin")
-    app_tabs = st.tabs(t_list)
+    t_names = ["Plan New Race", "My Saved Races", "Account Settings"]
+    if st.session_state.email == admin_mail: t_names.append("👑 Admin")
+    app_tabs = st.tabs(t_names)
     active_tab, saved_tab, settings_tab = app_tabs[0], app_tabs[1], app_tabs[2]
     admin_tab = app_tabs[3] if len(app_tabs) > 3 else None
 else:
     active_tab = st.container()
 
 with active_tab:
-    up = st.file_uploader("Upload GPX")
+    up = st.file_uploader("Upload GPX File")
     if up:
-        if 'p_df' not in st.session_state or st.session_state.f_name != up.name:
+        if 'p_df' not in st.session_state or st.session_state.get('f_name') != up.name:
             p_df, r_df = process_gpx(up.getvalue())
+            
+            # Initialize all checklist columns
             p_df['Pace'] = "06:00"
+            p_df['💧'] = False
+            p_df['🍯'] = False
+            p_df['🍌'] = False
+            p_df['🧂'] = False
+            p_df['Notes'] = ""
             st.session_state.p_df, st.session_state.r_df, st.session_state.f_name = p_df, r_df, up.name
         
         pdf, rdf = st.session_state.p_df, st.session_state.r_df
         t_dist = rdf['dist'].max() / 1000
         t_gain = pdf['gain'].sum()
         
-        # Header Metrics
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Distance", f"{t_dist:.2f} km")
-        m2.metric("Gain", f"{t_gain} m")
-        eta_placeholder = m3.empty()
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Distance", f"{t_dist:.2f} km")
+        col2.metric("Total Gain", f"{t_gain} m")
+        eta_placeholder = col3.empty()
 
         st.plotly_chart(px.area(rdf, x='dist', y='ele', height=250), width="stretch")
 
-        # Dual UI Editor
+        # --- Strict Column Configuration to prevent text wrapping ---
+        cfg = {
+            "km": st.column_config.NumberColumn("KM", width="small", disabled=True),
+            "gain": st.column_config.NumberColumn("🔺", width="small", disabled=True),
+            "loss": st.column_config.NumberColumn("🔻", width="small", disabled=True),
+            "Pace": st.column_config.TextColumn("Pace", width="small"),
+            "ETA": st.column_config.TextColumn("ETA", width="small", disabled=True),
+            "💧": st.column_config.CheckboxColumn("💧", width="small"),
+            "🍯": st.column_config.CheckboxColumn("🍯", width="small"),
+            "🍌": st.column_config.CheckboxColumn("🍌", width="small"),
+            "🧂": st.column_config.CheckboxColumn("🧂", width="small"),
+            "Notes": st.column_config.TextColumn("Notes", width="medium")
+        }
+
         if is_mobile:
-            with st.form("bulk_edit"):
-                f_km = st.number_input("From KM", 1, int(pdf['km'].max()), 1)
-                t_km = st.number_input("To KM", 1, int(pdf['km'].max()), int(pdf['km'].max()))
-                new_p = st.text_input("New Pace (mm:ss)", "06:00")
+            with st.form("mobile_edit"):
+                f_km, t_km = st.columns(2)
+                f_v = f_km.number_input("From KM", 1, int(pdf['km'].max()), 1)
+                t_v = t_km.number_input("To KM", 1, int(pdf['km'].max()), int(pdf['km'].max()))
+                p_v = st.text_input("New Pace (mm:ss)", "06:00")
+                nutri = st.multiselect("Nutrition", ["💧", "🍯", "🍌", "🧂"])
+                
                 if st.form_submit_button("Apply Changes", width="stretch"):
-                    pdf.loc[(pdf['km']>=f_km) & (pdf['km']<=t_km), 'Pace'] = new_p
+                    mask = (pdf['km'] >= f_v) & (pdf['km'] <= t_v)
+                    pdf.loc[mask, 'Pace'] = p_v
+                    for icon in ["💧", "🍯", "🍌", "🧂"]:
+                        pdf.loc[mask, icon] = (icon in nutri)
                     st.session_state.p_df = pdf
                     st.rerun()
             edit_df = pdf
         else:
-            edit_df = st.data_editor(pdf, hide_index=True, width="stretch", column_config={"km": st.column_config.NumberColumn(disabled=True)})
+            edit_df = st.data_editor(pdf, hide_index=True, width="stretch", column_config=cfg)
             st.session_state.p_df = edit_df
 
-        # Final Calculations
+        # ETA Calculations
         edit_df['sec'] = edit_df['Pace'].apply(pace_to_seconds)
         edit_df['ETA'] = edit_df['sec'].cumsum().apply(seconds_to_eta)
         eta_placeholder.metric("Estimated Finish", edit_df['ETA'].iloc[-1])
 
-        st.dataframe(edit_df[['km', 'gain', 'loss', 'Pace', 'ETA']], hide_index=True, width="stretch")
-        st.download_button("📥 Export CSV", edit_df.to_csv(index=False), "race_plan.csv", "text/csv", width="stretch")
-
+        # Display final table
+        st.dataframe(edit_df, hide_index=True, width="stretch", column_config=cfg)
+        
+        # Export & Save
+        st.download_button("📥 Download Plan (CSV)", edit_df.to_csv(index=False).encode('utf-8-sig'), "race_plan.csv", "text/csv", width="stretch")
+        
         if st.session_state.logged_in:
-            r_name = st.text_input("Save Race As...")
-            if st.button("💾 Save to Appwrite", width="stretch") and r_name:
+            r_name = st.text_input("Race Name to Save")
+            if st.button("💾 Save to Cloud", width="stretch") and r_name:
                 databases.create_document(DB_ID, R_COL, ID.unique(), {
                     "email": st.session_state.email,
                     "race_name": r_name,
@@ -216,25 +210,23 @@ with active_tab:
                 })
                 st.success("Race Saved Successfully!")
 
+# --- Saved Races Tab ---
 if st.session_state.logged_in:
     with saved_tab:
         docs = databases.list_documents(DB_ID, R_COL, [Query.equal("email", st.session_state.email), Query.order_desc("$createdAt")])
         for d in docs['documents']:
-            with st.expander(f"🏁 {d['race_name']} — {d['distance_km']:.1f}km"):
-                st.caption(f"Created: {d['$createdAt'][:10]} | Gain: {d['elevation_gain_m']}m | Finish: {d['finish_time']}")
+            with st.expander(f"🏁 {d['race_name']} ({d['distance_km']:.1f}km)"):
+                st.caption(f"Gain: {d['elevation_gain_m']}m | Time: {d['finish_time']}")
                 rdf = pd.read_json(io.StringIO(d['plan_json']))
-                st.dataframe(rdf, hide_index=True, width="stretch")
-                
+                st.dataframe(rdf, hide_index=True, width="stretch", column_config=cfg)
                 c_dl, c_del = st.columns(2)
-                c_dl.download_button("📥 Download", rdf.to_csv(index=False), f"{d['race_name']}.csv", key=f"dl_{d['$id']}")
-                if c_del.button("🗑️ Delete", key=f"del_{d['$id']}", width="stretch"):
+                c_dl.download_button("📥 Download CSV", rdf.to_csv(index=False).encode('utf-8-sig'), f"{d['race_name']}.csv", key=f"dl_{d['$id']}")
+                if c_del.button("🗑️ Delete Race", key=f"del_{d['$id']}", width="stretch"):
                     databases.delete_document(DB_ID, R_COL, d['$id'])
                     st.rerun()
 
+    # --- Admin Dashboard ---
     if admin_tab:
         with admin_tab:
             st.metric("Total Users", databases.list_documents(DB_ID, U_COL)['total'])
             st.metric("Total Plans", databases.list_documents(DB_ID, R_COL)['total'])
-            st.write("### Recent Activity")
-            recent = databases.list_documents(DB_ID, R_COL, [Query.order_desc("$createdAt"), Query.limit(5)])
-            st.table(pd.DataFrame(recent['documents'])[['email', 'race_name', 'distance_km']])
