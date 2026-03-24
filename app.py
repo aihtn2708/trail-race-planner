@@ -1,6 +1,3 @@
-import warnings
-warnings.filterwarnings("ignore")
-
 import streamlit as st
 import gpxpy
 import pandas as pd
@@ -12,9 +9,7 @@ from email.message import EmailMessage
 import random
 import string
 import io
-from appwrite.client import Client
-from appwrite.services.databases import Databases
-from appwrite.id import ID
+import requests
 from appwrite.query import Query
 
 # --- Page Configuration ---
@@ -28,42 +23,44 @@ def check_if_mobile():
     except: return False
 is_mobile = check_if_mobile()
 
-# --- Initialize Appwrite ---
-try:
-    client = Client()
-    client.set_endpoint(st.secrets["APPWRITE_ENDPOINT"])
-    client.set_project(st.secrets["APPWRITE_PROJECT_ID"])
-    client.set_key(st.secrets["APPWRITE_API_KEY"])
-    databases = Databases(client)
-    
-    DB_ID = st.secrets["APPWRITE_DATABASE_ID"]
-    U_COL = st.secrets["APPWRITE_USERS_COLLECTION"]
-    R_COL = st.secrets["APPWRITE_RACES_COLLECTION"]
-except Exception as e:
-    st.error(f"🚨 Appwrite Connection Error: {e}. Check your secrets!")
-    st.stop()
+# --- 🚀 NEW: Direct REST API Helpers (Bypasses buggy SDK) ---
+DB_ID = st.secrets["APPWRITE_DATABASE_ID"]
+U_COL = st.secrets["APPWRITE_USERS_COLLECTION"]
+R_COL = st.secrets["APPWRITE_RACES_COLLECTION"]
 
-# --- Super-Safe Data Extractor ---
-def get_val(obj, key, default=None):
-    if obj is None: return default
-    try: return obj[key]
-    except: pass
-    try: return getattr(obj, key)
-    except: pass
-    if key.startswith('$'):
-        try: return getattr(obj, key[1:])
-        except: pass
-        try: return obj[key[1:]]
-        except: pass
-    return default
+def get_headers():
+    return {
+        "X-Appwrite-Project": st.secrets["APPWRITE_PROJECT_ID"],
+        "X-Appwrite-Key": st.secrets["APPWRITE_API_KEY"],
+        "Content-Type": "application/json"
+    }
 
-# --- Database Query Helper ---
-def query_user_by_email(email):
-    try:
-        return databases.list_documents(database_id=DB_ID, collection_id=U_COL, queries=[Query.equal("email", email)])
-    except Exception as e:
-        st.error(f"🚨 Appwrite Database Error: {e}")
-        return None
+def get_base_url(collection):
+    return f"{st.secrets['APPWRITE_ENDPOINT']}/databases/{DB_ID}/collections/{collection}/documents"
+
+def api_list_docs(collection, queries=None):
+    params = {"queries[]": queries} if queries else {}
+    res = requests.get(get_base_url(collection), headers=get_headers(), params=params)
+    if res.status_code == 200: return res.json()
+    return None
+
+def api_create_doc(collection, data):
+    payload = {"documentId": "unique()", "data": data}
+    res = requests.post(get_base_url(collection), headers=get_headers(), json=payload)
+    if res.status_code not in (200, 201): raise Exception(res.text)
+    return res.json()
+
+def api_update_doc(collection, doc_id, data):
+    url = f"{get_base_url(collection)}/{doc_id}"
+    res = requests.patch(url, headers=get_headers(), json={"data": data})
+    if res.status_code != 200: raise Exception(res.text)
+    return res.json()
+
+def api_delete_doc(collection, doc_id):
+    url = f"{get_base_url(collection)}/{doc_id}"
+    res = requests.delete(url, headers=get_headers())
+    if res.status_code != 204: raise Exception(res.text)
+    return True
 
 # --- Security & Time Helpers ---
 def hash_password(password): 
@@ -75,14 +72,11 @@ def verify_password(password, hashed_str):
     except ValueError: return False
 
 def pace_to_seconds(p):
-    try:
-        m, s = map(int, str(p).split(':'))
-        return m * 60 + s
+    try: m, s = map(int, str(p).split(':')); return m * 60 + s
     except: return 360
 
 def seconds_to_eta(s_total):
-    h, m = divmod(s_total, 3600)
-    m, s = divmod(m, 60)
+    h, m = divmod(s_total, 3600); m, s = divmod(m, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 def send_reset_email(to_email, temp_password):
@@ -126,72 +120,40 @@ if not st.session_state.logged_in:
             
             if st.button("Submit Login", width="stretch"):
                 clean_email = em.strip().lower()
-                clean_pw = pw.strip() # 🚀 FIX: Strip invisible spaces from copy/pasting!
+                clean_pw = pw.strip() 
                 
-                res = query_user_by_email(clean_email)
-                
-                if res:
-                    total = get_val(res, 'total', 0)
-                    docs = get_val(res, 'documents', [])
+                res = api_list_docs(U_COL, [Query.equal("email", clean_email)])
+                if res and res.get('total', 0) > 0:
+                    docs = res.get('documents', [])
+                    stored_hash = docs[0].get('password_hash', '')
                     
-                    if total > 0:
-                        stored_hash = get_val(docs[0], 'password_hash', '')
-                        
-                        if verify_password(clean_pw, stored_hash):
-                            st.session_state.logged_in = True
-                            st.session_state.email = clean_email
-                            st.rerun()
-                        else: 
-                            st.error("❌ Incorrect password.")
-                            
-                            # 🕵️ DEEP DIAGNOSTIC INSPECTOR
-                            with st.expander("🕵️ Debug Inspector (Click to open)"):
-                                st.markdown("### 🔍 Security Diagnostic Report")
-                                st.write(f"**1. Typed Password Length:** `{len(clean_pw)}` characters (Stripped of spaces)")
-                                st.write(f"**2. Database Hash Extracted:** `{stored_hash}`")
-                                st.write(f"**3. Database Hash Length:** `{len(str(stored_hash))}` characters")
-                                
-                                st.markdown("### 🧪 Local System Test")
-                                try:
-                                    test_hash = hash_password(clean_pw)
-                                    st.write(f"- Server generated a test hash successfully: `{test_hash}`")
-                                    match_works = verify_password(clean_pw, test_hash)
-                                    st.write(f"- Server can successfully read its own hashes: **{match_works}**")
-                                    
-                                    db_match = bcrypt.checkpw(clean_pw.encode('utf-8'), stored_hash.encode('utf-8'))
-                                    st.write(f"- Direct Database Match Test: **{db_match}**")
-                                except Exception as e:
-                                    st.error(f"🚨 Python Bcrypt Error: {e}")
-                                    st.info("If you see an error here, the hash in the database is corrupted (e.g. missing its $ signs) or your server doesn't support bcrypt properly.")
-                    else: 
-                        st.error("❌ Email not found. Try signing up first.")
+                    if verify_password(clean_pw, stored_hash):
+                        st.session_state.logged_in, st.session_state.email = True, clean_email
+                        st.rerun()
+                    else: st.error("❌ Incorrect password.")
+                else: st.error("❌ Email not found. Try signing up first.")
             
             # --- FORGOT PASSWORD ---
             with st.expander("Forgot Password?"):
                 reset_em = st.text_input("Enter your account email", key="reset_em")
                 if st.button("Send Temp Password", width="stretch"):
                     clean_reset = reset_em.strip().lower()
-                    res = query_user_by_email(clean_reset)
+                    res = api_list_docs(U_COL, [Query.equal("email", clean_reset)])
                     
-                    if res and get_val(res, 'total', 0) > 0:
+                    if res and res.get('total', 0) > 0:
                         temp_pwd = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
-                        doc_id = get_val(get_val(res, 'documents', [])[0], '$id', get_val(get_val(res, 'documents', [])[0], 'id'))
+                        doc_id = res['documents'][0]['$id']
                         
                         try:
-                            databases.update_document(
-                                database_id=DB_ID, collection_id=U_COL, document_id=doc_id, 
-                                data={"password_hash": hash_password(temp_pwd)}
-                            )
+                            api_update_doc(U_COL, doc_id, {"password_hash": hash_password(temp_pwd)})
                             email_status = send_reset_email(clean_reset, temp_pwd)
                             if email_status == "SUCCESS":
                                 st.success("✅ A temporary password has been sent to your email.")
                             else:
                                 st.warning("⚠️ Email server not configured. Your temp password is:")
                                 st.code(temp_pwd) 
-                        except Exception as e:
-                            st.error(f"🚨 Failed to update password: {e}")
-                    else:
-                        st.error("❌ Email not found in our database.")
+                        except Exception as e: st.error(f"🚨 Failed to update password: {e}")
+                    else: st.error("❌ Email not found in our database.")
                     
         # --- SIGN UP ---
         with t[1]:
@@ -203,20 +165,14 @@ if not st.session_state.logged_in:
                 clean_new_pw = rpw.strip()
                 
                 if len(clean_new_pw) >= 6 and "@" in clean_new_email:
-                    res = query_user_by_email(clean_new_email)
-                    if res is not None and get_val(res, 'total', 0) == 0:
+                    res = api_list_docs(U_COL, [Query.equal("email", clean_new_email)])
+                    if res is not None and res.get('total', 0) == 0:
                         try:
-                            databases.create_document(
-                                database_id=DB_ID, collection_id=U_COL, document_id=ID.unique(), 
-                                data={"email": clean_new_email, "password_hash": hash_password(clean_new_pw)}
-                            )
+                            api_create_doc(U_COL, {"email": clean_new_email, "password_hash": hash_password(clean_new_pw)})
                             st.success("✅ Account created! Please switch to the Login tab.")
-                        except Exception as e:
-                            st.error(f"🚨 Failed to create account. Check Appwrite Permissions! {e}")
-                    elif res is not None: 
-                        st.error("⚠️ An account with this email already exists.")
-                else:
-                    st.error("Invalid email, or password is less than 6 characters.")
+                        except Exception as e: st.error(f"🚨 Failed to create account. {e}")
+                    elif res is not None: st.error("⚠️ An account with this email already exists.")
+                else: st.error("Invalid email, or password is less than 6 characters.")
 else:
     st.sidebar.success(f"User: {st.session_state.email}")
     if st.sidebar.button("Log Out", width="stretch"):
@@ -252,21 +208,14 @@ if st.session_state.logged_in:
     app_tabs = st.tabs(t_names)
     active_tab, saved_tab, settings_tab = app_tabs[0], app_tabs[1], app_tabs[2]
     admin_tab = app_tabs[3] if len(app_tabs) > 3 else None
-else:
-    active_tab = st.container()
+else: active_tab = st.container()
 
 with active_tab:
     up = st.file_uploader("Upload GPX File")
     if up:
         if 'p_df' not in st.session_state or st.session_state.get('f_name') != up.name:
             p_df, r_df = process_gpx(up.getvalue())
-            
-            p_df['Pace'] = "06:00"
-            p_df['💧'] = False
-            p_df['🍯'] = False
-            p_df['🍌'] = False
-            p_df['🧂'] = False
-            p_df['Notes'] = ""
+            p_df['Pace'], p_df['💧'], p_df['🍯'], p_df['🍌'], p_df['🧂'], p_df['Notes'] = "06:00", False, False, False, False, ""
             st.session_state.p_df, st.session_state.r_df, st.session_state.f_name = p_df, r_df, up.name
         
         base_df = st.session_state.p_df.copy()
@@ -275,8 +224,7 @@ with active_tab:
         display_df = base_df.drop(columns=['sec'])
         
         rdf = st.session_state.r_df
-        t_dist = rdf['dist'].max() / 1000
-        t_gain = display_df['gain'].sum()
+        t_dist, t_gain = rdf['dist'].max() / 1000, display_df['gain'].sum()
         total_time = display_df['ETA'].iloc[-1]
         
         col1, col2, col3 = st.columns(3)
@@ -311,8 +259,7 @@ with active_tab:
                 if st.form_submit_button("Apply Changes", width="stretch"):
                     mask = (st.session_state.p_df['km'] >= f_v) & (st.session_state.p_df['km'] <= t_v)
                     st.session_state.p_df.loc[mask, 'Pace'] = p_v
-                    for icon in ["💧", "🍯", "🍌", "🧂"]:
-                        st.session_state.p_df.loc[mask, icon] = (icon in nutri)
+                    for icon in ["💧", "🍯", "🍌", "🧂"]: st.session_state.p_df.loc[mask, icon] = (icon in nutri)
                     st.rerun()
             st.dataframe(display_df, hide_index=True, width="stretch", column_config=cfg)
             final_display_df = display_df
@@ -330,40 +277,27 @@ with active_tab:
             r_name = st.text_input("Race Name to Save")
             if st.button("💾 Save to Cloud", width="stretch") and r_name:
                 try:
-                    databases.create_document(
-                        database_id=DB_ID, collection_id=R_COL, document_id=ID.unique(), 
-                        data={
-                            "email": st.session_state.email, "race_name": r_name,
-                            "plan_json": final_display_df.to_json(orient='records'),
-                            "distance_km": float(t_dist), "elevation_gain_m": int(t_gain),
-                            "finish_time": total_time
-                        }
-                    )
+                    api_create_doc(R_COL, {
+                        "email": st.session_state.email, "race_name": r_name,
+                        "plan_json": final_display_df.to_json(orient='records'),
+                        "distance_km": float(t_dist), "elevation_gain_m": int(t_gain), "finish_time": total_time
+                    })
                     st.success("Race Saved Successfully!")
-                except Exception as e:
-                    st.error(f"🚨 Save Error: {e}")
+                except Exception as e: st.error(f"🚨 Save Error: {e}")
 
 # --- Saved Races Tab ---
 if st.session_state.logged_in:
     with saved_tab:
         try:
-            res = databases.list_documents(database_id=DB_ID, collection_id=R_COL, queries=[Query.equal("email", st.session_state.email), Query.order_desc("$createdAt")])
-            docs = get_val(res, 'documents', [])
+            res = api_list_docs(R_COL, [Query.equal("email", st.session_state.email), Query.order_desc("$createdAt")])
+            docs = res.get('documents', []) if res else []
         except:
             docs = []
-            st.error("🚨 Failed to load saved races. Check Appwrite Indexes!")
+            st.error("🚨 Failed to load saved races.")
             
         for d in docs:
-            r_name = get_val(d, 'race_name', 'Unknown')
-            dist = get_val(d, 'distance_km', 0.0)
-            gain = get_val(d, 'elevation_gain_m', 0)
-            ftime = get_val(d, 'finish_time', 'N/A')
-            p_json = get_val(d, 'plan_json', '[]')
-            
-            if isinstance(d, dict):
-                doc_id = d.get('$id', d.get('id', ''))
-            else:
-                doc_id = getattr(d, 'id', getattr(d, '$id', ''))
+            r_name, dist, gain = d.get('race_name', 'Unknown'), d.get('distance_km', 0.0), d.get('elevation_gain_m', 0)
+            ftime, p_json, doc_id = d.get('finish_time', 'N/A'), d.get('plan_json', '[]'), d.get('$id')
             
             with st.expander(f"🏁 {r_name} ({dist:.1f}km)"):
                 st.caption(f"Gain: {gain}m | Time: {ftime}")
@@ -375,7 +309,7 @@ if st.session_state.logged_in:
                 c_dl, c_del = st.columns(2)
                 c_dl.download_button("📥 Download CSV", rdf.to_csv(index=False).encode('utf-8-sig'), f"{r_name}.csv", key=f"dl_{doc_id}")
                 if c_del.button("🗑️ Delete Race", key=f"del_{doc_id}", width="stretch"):
-                    databases.delete_document(database_id=DB_ID, collection_id=R_COL, document_id=doc_id)
+                    api_delete_doc(R_COL, doc_id)
                     st.rerun()
 
     with settings_tab:
@@ -385,30 +319,24 @@ if st.session_state.logged_in:
             new_pwd = st.text_input("New Password", type="password")
             confirm_pwd = st.text_input("Confirm New Password", type="password")
             if st.form_submit_button("Update Password", width="stretch"):
-                res = query_user_by_email(st.session_state.email)
-                docs = get_val(res, 'documents', []) if res else []
+                res = api_list_docs(U_COL, [Query.equal("email", st.session_state.email)])
+                docs = res.get('documents', []) if res else []
                 if docs:
-                    user_doc = docs[0]
-                    stored_hash = get_val(user_doc, 'password_hash', '')
+                    stored_hash = docs[0].get('password_hash', '')
+                    doc_id = docs[0].get('$id')
                     
-                    if isinstance(user_doc, dict):
-                        doc_id = user_doc.get('$id', user_doc.get('id', ''))
-                    else:
-                        doc_id = getattr(user_doc, 'id', getattr(user_doc, '$id', ''))
-                        
                     if not verify_password(current_pwd, stored_hash): st.error("Current password incorrect.")
                     elif new_pwd != confirm_pwd: st.error("New passwords do not match.")
                     elif len(new_pwd) < 6: st.error("Must be at least 6 characters.")
                     else:
-                        databases.update_document(database_id=DB_ID, collection_id=U_COL, document_id=doc_id, data={"password_hash": hash_password(new_pwd)})
+                        api_update_doc(U_COL, doc_id, {"password_hash": hash_password(new_pwd)})
                         st.success("Password updated!")
 
     if admin_tab:
         with admin_tab:
             try:
-                u_res = databases.list_documents(database_id=DB_ID, collection_id=U_COL)
-                r_res = databases.list_documents(database_id=DB_ID, collection_id=R_COL)
-                st.metric("Total Users", get_val(u_res, 'total', 0))
-                st.metric("Total Plans", get_val(r_res, 'total', 0))
-            except Exception as e:
-                st.error(f"Admin Metrics Error: {e}")
+                u_res = api_list_docs(U_COL)
+                r_res = api_list_docs(R_COL)
+                st.metric("Total Users", u_res.get('total', 0) if u_res else 0)
+                st.metric("Total Plans", r_res.get('total', 0) if r_res else 0)
+            except Exception as e: st.error(f"Admin Metrics Error: {e}")
