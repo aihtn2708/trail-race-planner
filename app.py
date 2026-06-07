@@ -1,189 +1,342 @@
 import streamlit as st
+import gpxpy
 import pandas as pd
-import sqlite3
-import io
+import plotly.express as px
 import re
-import torch
-from sentence_transformers import SentenceTransformer, util
+import bcrypt
+import smtplib
+from email.message import EmailMessage
+import random
+import string
+import io
+import requests
+from appwrite.query import Query
 
-st.set_page_config(page_title="SKU ML Batch Mapper (With History)", layout="wide")
+# --- Page Configuration ---
+st.set_page_config(page_title="Trail Race Planner", layout="wide", initial_sidebar_state="collapsed")
 
-# ==========================================
-# 1. ML Model Initialization
-# ==========================================
-@st.cache_resource
-def load_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
+# --- Device Detection ---
+def check_if_mobile():
+    try:
+        user_agent = st.context.headers.get("user-agent", "").lower()
+        return any(keyword in user_agent for keyword in ['mobile', 'android', 'iphone', 'ipad'])
+    except: return False
+is_mobile = check_if_mobile()
 
-model = load_model()
+# --- 🚀 NEW: Direct REST API Helpers (Bypasses buggy SDK) ---
+DB_ID = st.secrets["APPWRITE_DATABASE_ID"]
+U_COL = st.secrets["APPWRITE_USERS_COLLECTION"]
+R_COL = st.secrets["APPWRITE_RACES_COLLECTION"]
 
-# ==========================================
-# 2. Text Normalization 
-# ==========================================
-ABBREV = {
-    "al": "alpenliebe", "alp": "alpenliebe", "cc": "chupa chups", "mt": "mentos",
-    "mts": "mentos", "gl": "golia", "bb": "big babol", "llp": "lollipop",
-    "straw": "strawberry", "pfruit": "passionfruit", "chiaki": "chia kiwi",
-    "px": "pouch", "pcs": "pieces", "pc": "pieces"
-}
+def get_headers():
+    return {
+        "X-Appwrite-Project": st.secrets["APPWRITE_PROJECT_ID"],
+        "X-Appwrite-Key": st.secrets["APPWRITE_API_KEY"],
+        "Content-Type": "application/json"
+    }
 
-def clean_text(text):
-    if not isinstance(text, str): return ""
-    text = text.lower()
-    text = re.sub(r'[()/.,&]', ' ', text)
-    text = re.sub(r'\d+(\.\d+)?\s*(g|kg|px|pcs|pc|box|bag|bags|stick|sticks|tin)\b', ' ', text)
-    return " ".join([ABBREV.get(w, w) for w in text.split()])
+def get_base_url(collection):
+    return f"{st.secrets['APPWRITE_ENDPOINT']}/databases/{DB_ID}/collections/{collection}/documents"
 
-# ==========================================
-# 3. Application UI
-# ==========================================
-st.title("🧠 Advanced SKU ML Mapper (History-Aware)")
-st.markdown("This version learns from your historical data. It auto-carries exact matches and uses historical 'messy' descriptions to improve ML fuzzy matching for unseen items.")
+def api_list_docs(collection, queries=None):
+    params = {"queries[]": queries} if queries else {}
+    res = requests.get(get_base_url(collection), headers=get_headers(), params=params)
+    if res.status_code == 200: return res.json()
+    return None
 
-col1, col2, col3 = st.columns(3)
+def api_create_doc(collection, data):
+    payload = {"documentId": "unique()", "data": data}
+    res = requests.post(get_base_url(collection), headers=get_headers(), json=payload)
+    if res.status_code not in (200, 201): raise Exception(res.text)
+    return res.json()
 
-with col1:
-    st.subheader("1. Mother Registry")
-    st.caption("Canonical list of products")
-    mother_file = st.file_uploader("Upload Mother SKUs", type=['xlsx', 'csv'], key="mother")
+def api_update_doc(collection, doc_id, data):
+    url = f"{get_base_url(collection)}/{doc_id}"
+    res = requests.patch(url, headers=get_headers(), json={"data": data})
+    if res.status_code != 200: raise Exception(res.text)
+    return res.json()
 
-with col2:
-    st.subheader("2. Historical Data")
-    st.caption("Previous Child -> Mother mappings")
-    hist_file = st.file_uploader("Upload History", type=['xlsx', 'csv'], key="history")
+def api_delete_doc(collection, doc_id):
+    url = f"{get_base_url(collection)}/{doc_id}"
+    res = requests.delete(url, headers=get_headers())
+    if res.status_code != 204: raise Exception(res.text)
+    return True
 
-with col3:
-    st.subheader("3. New Child SKUs")
-    st.caption("Unmapped raw data")
-    child_file = st.file_uploader("Upload New SKUs", type=['xlsx', 'csv'], key="child")
+# --- Security & Time Helpers ---
+def hash_password(password): 
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
+def verify_password(password, hashed_str):
+    if not hashed_str or not isinstance(hashed_str, str): return False
+    try: return bcrypt.checkpw(password.encode('utf-8'), hashed_str.encode('utf-8'))
+    except ValueError: return False
 
-if mother_file and hist_file and child_file:
-    if st.button("🚀 Run Advanced ML Pipeline", type="primary"):
-        with st.spinner("Analyzing history and running ML embeddings..."):
+def pace_to_seconds(p):
+    try: m, s = map(int, str(p).split(':')); return m * 60 + s
+    except: return 360
+
+def seconds_to_eta(s_total):
+    h, m = divmod(s_total, 3600); m, s = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+def send_reset_email(to_email, temp_password):
+    sender = st.secrets.get("SENDER_EMAIL")
+    pwd = st.secrets.get("SENDER_APP_PASSWORD")
+    if not sender or not pwd: return "SIMULATED"
+    
+    msg = EmailMessage()
+    msg.set_content(f"Your temporary password is: {temp_password}\n\nPlease log in and update your password immediately.")
+    msg['Subject'] = 'Password Reset - Trail Race Planner'
+    msg['From'], msg['To'] = sender, to_email
+    try:
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.login(sender, pwd)
+        server.send_message(msg)
+        server.quit()
+        return "SUCCESS"
+    except Exception as e: return str(e)
+
+# --- State Management ---
+if 'logged_in' not in st.session_state: st.session_state.logged_in = False
+if 'email' not in st.session_state: st.session_state.email = ""
+if 'guest_mode' not in st.session_state: st.session_state.guest_mode = False
+
+# --- Sidebar Auth ---
+st.sidebar.title("Account Access")
+if not st.session_state.logged_in:
+    c1, c2 = st.sidebar.columns(2)
+    with c1: 
+        if st.button("👤 Guest", width="stretch"): st.session_state.guest_mode = True
+    with c2: 
+        if st.button("🔒 Login", width="stretch"): st.session_state.guest_mode = False
+
+    if not st.session_state.guest_mode:
+        t = st.sidebar.tabs(["Login", "Sign Up"])
+        
+        # --- LOGIN ---
+        with t[0]:
+            em = st.text_input("Email", key="l_em")
+            pw = st.text_input("Password", type="password", key="l_pw")
             
-            # --- Step A: Read Files ---
-            read_file = lambda f: pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
-            df_mother = read_file(mother_file)
-            df_hist = read_file(hist_file)
-            df_child = read_file(child_file)
-            
-            # Helper to find columns dynamically
-            def get_col(df, keywords):
-                return next((c for c in df.columns if any(k in str(c).lower() for k in keywords)), df.columns[0])
-
-            m_code = get_col(df_mother, ['code', 'id'])
-            m_desc = get_col(df_mother, ['desc', 'name'])
-            
-            h_c_code = get_col(df_hist, ['child', 'code'])
-            h_c_desc = get_col(df_hist, ['child', 'desc'])
-            h_m_code = get_col(df_hist, ['mother', 'target'])
-            
-            c_code = get_col(df_child, ['code', 'id'])
-            c_desc = get_col(df_child, ['desc', 'name'])
-
-            # --- Step B: Build Exact History Dictionary ---
-            # Creates a fast lookup mapping known child codes to their mother codes
-            history_dict = dict(zip(df_hist[h_c_code].astype(str), df_hist[h_m_code].astype(str)))
-
-            # --- Step C: ML Embeddings ---
-            st.toast("Generating embeddings...", icon="🧠")
-            
-            # Clean texts
-            mother_clean = df_mother[m_desc].apply(clean_text).tolist()
-            hist_clean = df_hist[h_c_desc].apply(clean_text).tolist()
-            child_clean = df_child[c_desc].apply(clean_text).tolist()
-            
-            # Encode texts into ML vectors
-            mother_embs = model.encode(mother_clean, convert_to_tensor=True)
-            hist_embs = model.encode(hist_clean, convert_to_tensor=True)
-            child_embs = model.encode(child_clean, convert_to_tensor=True)
-            
-            # --- Step D: The Triage Matching Engine ---
-            st.toast("Triaging SKUs...", icon="🔍")
-            
-            results = []
-            
-            for i, row in df_child.iterrows():
-                current_code = str(row[c_code])
-                current_emb = child_embs[i]
+            if st.button("Submit Login", width="stretch"):
+                clean_email = em.strip().lower()
+                clean_pw = pw.strip() 
                 
-                # TIER 1: Exact History Match
-                if current_code in history_dict:
-                    results.append({
-                        "child_code": current_code,
-                        "predicted_mother_code": history_dict[current_code],
-                        "confidence_score": 100.0,
-                        "match_method": "Auto-carry (History)"
+                res = api_list_docs(U_COL, [Query.equal("email", clean_email)])
+                if res and res.get('total', 0) > 0:
+                    docs = res.get('documents', [])
+                    stored_hash = docs[0].get('password_hash', '')
+                    
+                    if verify_password(clean_pw, stored_hash):
+                        st.session_state.logged_in, st.session_state.email = True, clean_email
+                        st.rerun()
+                    else: st.error("❌ Incorrect password.")
+                else: st.error("❌ Email not found. Try signing up first.")
+            
+            # --- FORGOT PASSWORD ---
+            with st.expander("Forgot Password?"):
+                reset_em = st.text_input("Enter your account email", key="reset_em")
+                if st.button("Send Temp Password", width="stretch"):
+                    clean_reset = reset_em.strip().lower()
+                    res = api_list_docs(U_COL, [Query.equal("email", clean_reset)])
+                    
+                    if res and res.get('total', 0) > 0:
+                        temp_pwd = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
+                        doc_id = res['documents'][0]['$id']
+                        
+                        try:
+                            api_update_doc(U_COL, doc_id, {"password_hash": hash_password(temp_pwd)})
+                            email_status = send_reset_email(clean_reset, temp_pwd)
+                            if email_status == "SUCCESS":
+                                st.success("✅ A temporary password has been sent to your email.")
+                            else:
+                                st.warning("⚠️ Email server not configured. Your temp password is:")
+                                st.code(temp_pwd) 
+                        except Exception as e: st.error(f"🚨 Failed to update password: {e}")
+                    else: st.error("❌ Email not found in our database.")
+                    
+        # --- SIGN UP ---
+        with t[1]:
+            rem = st.text_input("New Email", key="r_em")
+            rpw = st.text_input("New Password", type="password", key="r_pw")
+            
+            if st.button("Create Account", width="stretch"):
+                clean_new_email = rem.strip().lower()
+                clean_new_pw = rpw.strip()
+                
+                if len(clean_new_pw) >= 6 and "@" in clean_new_email:
+                    res = api_list_docs(U_COL, [Query.equal("email", clean_new_email)])
+                    if res is not None and res.get('total', 0) == 0:
+                        try:
+                            api_create_doc(U_COL, {"email": clean_new_email, "password_hash": hash_password(clean_new_pw)})
+                            st.success("✅ Account created! Please switch to the Login tab.")
+                        except Exception as e: st.error(f"🚨 Failed to create account. {e}")
+                    elif res is not None: st.error("⚠️ An account with this email already exists.")
+                else: st.error("Invalid email, or password is less than 6 characters.")
+else:
+    st.sidebar.success(f"User: {st.session_state.email}")
+    if st.sidebar.button("Log Out", width="stretch"):
+        st.session_state.logged_in = False
+        st.rerun()
+
+# --- GPX Processing ---
+@st.cache_data
+def process_gpx(file_bytes):
+    gpx = gpxpy.parse(file_bytes)
+    pts = []
+    d_acc = 0
+    prev = None
+    for track in gpx.tracks:
+        for segment in track.segments:
+            for p in segment.points:
+                if prev: d_acc += p.distance_2d(prev)
+                pts.append({'dist': d_acc, 'ele': p.elevation})
+                prev = p
+    df = pd.DataFrame(pts)
+    df['km'] = (df['dist'] // 1000).astype(int) + 1
+    df['diff'] = df['ele'].diff().fillna(0)
+    plan = df.groupby('km').agg(gain=('diff', lambda x: x[x>0].sum()), loss=('diff', lambda x: abs(x[x<0].sum()))).reset_index()
+    return plan.round(0).astype(int), df
+
+# --- Main UI ---
+st.title("🏔️ Trail Race Planner")
+ADMIN_EMAIL = "aihtn2708@gmail.com" 
+
+if st.session_state.logged_in:
+    t_names = ["Plan New Race", "My Saved Races", "Account Settings"]
+    if st.session_state.email == ADMIN_EMAIL: t_names.append("👑 Admin")
+    app_tabs = st.tabs(t_names)
+    active_tab, saved_tab, settings_tab = app_tabs[0], app_tabs[1], app_tabs[2]
+    admin_tab = app_tabs[3] if len(app_tabs) > 3 else None
+else: active_tab = st.container()
+
+with active_tab:
+    up = st.file_uploader("Upload GPX File")
+    if up:
+        if 'p_df' not in st.session_state or st.session_state.get('f_name') != up.name:
+            p_df, r_df = process_gpx(up.getvalue())
+            p_df['Pace'], p_df['💧'], p_df['🍯'], p_df['🍌'], p_df['🧂'], p_df['Notes'] = "06:00", False, False, False, False, ""
+            st.session_state.p_df, st.session_state.r_df, st.session_state.f_name = p_df, r_df, up.name
+        
+        base_df = st.session_state.p_df.copy()
+        base_df['sec'] = base_df['Pace'].apply(pace_to_seconds)
+        base_df['ETA'] = base_df['sec'].cumsum().apply(seconds_to_eta)
+        display_df = base_df.drop(columns=['sec'])
+        
+        rdf = st.session_state.r_df
+        t_dist, t_gain = rdf['dist'].max() / 1000, display_df['gain'].sum()
+        total_time = display_df['ETA'].iloc[-1]
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Distance", f"{t_dist:.2f} km")
+        col2.metric("Total Gain", f"{t_gain} m")
+        col3.metric("Estimated Finish", total_time)
+
+        st.plotly_chart(px.area(rdf, x='dist', y='ele', height=250), width="stretch")
+
+        cfg = {
+            "km": st.column_config.NumberColumn("KM", width="small", disabled=True),
+            "gain": st.column_config.NumberColumn("🔺", width="small", disabled=True, help="Elevation Gain (m)"),
+            "loss": st.column_config.NumberColumn("🔻", width="small", disabled=True, help="Elevation Loss (m)"),
+            "Pace": st.column_config.TextColumn("Pace", width="small", help="Target Pace (mm:ss)"),
+            "ETA": st.column_config.TextColumn("ETA", width="small", disabled=True, help="Estimated Time of Arrival"),
+            "💧": st.column_config.CheckboxColumn("💧", width="small", help="Water"),
+            "🍯": st.column_config.CheckboxColumn("🍯", width="small", help="Energy Gel"),
+            "🍌": st.column_config.CheckboxColumn("🍌", width="small", help="Real Food / Solid Nutrition"),
+            "🧂": st.column_config.CheckboxColumn("🧂", width="small", help="Salt / Electrolyte Pills"),
+            "Notes": st.column_config.TextColumn("Notes", width="medium", help="Optional strategy notes")
+        }
+
+        if is_mobile:
+            st.info("📱 **Mobile View:** Swipe left/right on the table below to view all columns.")
+            with st.form("mobile_edit"):
+                f_km, t_km = st.columns(2)
+                f_v = f_km.number_input("From KM", 1, int(display_df['km'].max()), 1)
+                t_v = t_km.number_input("To KM", 1, int(display_df['km'].max()), int(display_df['km'].max()))
+                p_v = st.text_input("New Pace (mm:ss)", "06:00")
+                nutri = st.multiselect("Nutrition", ["💧", "🍯", "🍌", "🧂"], help="Select what to consume in this section")
+                
+                if st.form_submit_button("Apply Changes", width="stretch"):
+                    mask = (st.session_state.p_df['km'] >= f_v) & (st.session_state.p_df['km'] <= t_v)
+                    st.session_state.p_df.loc[mask, 'Pace'] = p_v
+                    for icon in ["💧", "🍯", "🍌", "🧂"]: st.session_state.p_df.loc[mask, icon] = (icon in nutri)
+                    st.rerun()
+            st.dataframe(display_df, hide_index=True, width="stretch", column_config=cfg)
+            final_display_df = display_df
+        else:
+            st.info("💻 **Desktop View:** Click directly into the table cells below to edit your pace and nutrition.")
+            edit_df = st.data_editor(display_df, hide_index=True, width="stretch", column_config=cfg)
+            if not edit_df.equals(display_df):
+                st.session_state.p_df = edit_df.drop(columns=['ETA'])
+                st.rerun()
+            final_display_df = edit_df
+        
+        st.download_button("📥 Download Plan (CSV)", final_display_df.to_csv(index=False).encode('utf-8-sig'), "race_plan.csv", "text/csv", width="stretch")
+        
+        if st.session_state.logged_in:
+            r_name = st.text_input("Race Name to Save")
+            if st.button("💾 Save to Cloud", width="stretch") and r_name:
+                try:
+                    api_create_doc(R_COL, {
+                        "email": st.session_state.email, "race_name": r_name,
+                        "plan_json": final_display_df.to_json(orient='records'),
+                        "distance_km": float(t_dist), "elevation_gain_m": int(t_gain), "finish_time": total_time
                     })
-                    continue
-                    
-                # TIER 2 & 3: Semantic ML Match
-                # Compare against canonical Mothers
-                sim_mother = util.cos_sim(current_emb, mother_embs)[0]
-                best_m_score, best_m_idx = torch.max(sim_mother, dim=0)
-                
-                # Compare against messy Historical Children
-                sim_hist = util.cos_sim(current_emb, hist_embs)[0]
-                best_h_score, best_h_idx = torch.max(sim_hist, dim=0)
-                
-                # Choose the path with higher confidence
-                if best_h_score > best_m_score:
-                    # The new messy SKU looks very much like an old messy SKU
-                    best_mother = df_hist.iloc[best_h_idx.item()][h_m_code]
-                    score = best_h_score.item() * 100
-                    method = "ML Fuzzy (Matched via History)"
-                else:
-                    # The new messy SKU looks more like a clean Mother SKU
-                    best_mother = df_mother.iloc[best_m_idx.item()][m_code]
-                    score = best_m_score.item() * 100
-                    method = "ML Fuzzy (Matched direct to Mother)"
-                    
-                results.append({
-                    "child_code": current_code,
-                    "predicted_mother_code": best_mother,
-                    "confidence_score": round(score, 1),
-                    "match_method": method
-                })
+                    st.success("Race Saved Successfully!")
+                except Exception as e: st.error(f"🚨 Save Error: {e}")
 
-            df_results = pd.DataFrame(results)
-            df_child = df_child.merge(df_results, left_on=c_code, right_on="child_code", how="left")
+# --- Saved Races Tab ---
+if st.session_state.logged_in:
+    with saved_tab:
+        try:
+            res = api_list_docs(R_COL, [Query.equal("email", st.session_state.email), Query.order_desc("$createdAt")])
+            docs = res.get('documents', []) if res else []
+        except:
+            docs = []
+            st.error("🚨 Failed to load saved races.")
             
-            # --- Step E: In-Memory SQLite Join ---
-            conn = sqlite3.connect(':memory:')
-            df_mother.to_sql('mothers', conn, index=False)
-            df_child.to_sql('children', conn, index=False)
+        for d in docs:
+            r_name, dist, gain = d.get('race_name', 'Unknown'), d.get('distance_km', 0.0), d.get('elevation_gain_m', 0)
+            ftime, p_json, doc_id = d.get('finish_time', 'N/A'), d.get('plan_json', '[]'), d.get('$id')
             
-            query = f"""
-                SELECT 
-                    c.*,
-                    m."{m_desc}" as predicted_mother_desc
-                FROM children c
-                LEFT JOIN mothers m 
-                ON c.predicted_mother_code = m."{m_code}"
-                ORDER BY c.confidence_score DESC
-            """
-            
-            final_df = pd.read_sql_query(query, conn)
-            conn.close()
-            
-            # --- Step F: Display & Export ---
-            st.success("Mapping Complete!")
-            
-            st.dataframe(
-                final_df[[c_code, c_desc, 'predicted_mother_code', 'predicted_mother_desc', 'confidence_score', 'match_method']].head(50), 
-                use_container_width=True,
-                column_config={"confidence_score": st.column_config.ProgressColumn("Confidence (%)", min_value=0, max_value=100)}
-            )
-            
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                final_df.to_excel(writer, index=False, sheet_name='Mapped_SKUs')
-            
-            st.download_button(
-                label="⬇️ Download Full Mapped Results",
-                data=buffer.getvalue(),
-                file_name="History_Aware_SKU_Mappings.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
+            with st.expander(f"🏁 {r_name} ({dist:.1f}km)"):
+                st.caption(f"Gain: {gain}m | Time: {ftime}")
+                rdf = pd.read_json(io.StringIO(p_json))
+                if 'sec' in rdf.columns: rdf = rdf.drop(columns=['sec'])
+                
+                st.dataframe(rdf, hide_index=True, width="stretch", column_config=cfg)
+                
+                c_dl, c_del = st.columns(2)
+                c_dl.download_button("📥 Download CSV", rdf.to_csv(index=False).encode('utf-8-sig'), f"{r_name}.csv", key=f"dl_{doc_id}")
+                if c_del.button("🗑️ Delete Race", key=f"del_{doc_id}", width="stretch"):
+                    api_delete_doc(R_COL, doc_id)
+                    st.rerun()
+
+    with settings_tab:
+        st.subheader("🔐 Change Your Password")
+        with st.form("change_password_form"):
+            current_pwd = st.text_input("Current Password", type="password")
+            new_pwd = st.text_input("New Password", type="password")
+            confirm_pwd = st.text_input("Confirm New Password", type="password")
+            if st.form_submit_button("Update Password", width="stretch"):
+                res = api_list_docs(U_COL, [Query.equal("email", st.session_state.email)])
+                docs = res.get('documents', []) if res else []
+                if docs:
+                    stored_hash = docs[0].get('password_hash', '')
+                    doc_id = docs[0].get('$id')
+                    
+                    if not verify_password(current_pwd, stored_hash): st.error("Current password incorrect.")
+                    elif new_pwd != confirm_pwd: st.error("New passwords do not match.")
+                    elif len(new_pwd) < 6: st.error("Must be at least 6 characters.")
+                    else:
+                        api_update_doc(U_COL, doc_id, {"password_hash": hash_password(new_pwd)})
+                        st.success("Password updated!")
+
+    if admin_tab:
+        with admin_tab:
+            try:
+                u_res = api_list_docs(U_COL)
+                r_res = api_list_docs(R_COL)
+                st.metric("Total Users", u_res.get('total', 0) if u_res else 0)
+                st.metric("Total Plans", r_res.get('total', 0) if r_res else 0)
+            except Exception as e: st.error(f"Admin Metrics Error: {e}")
